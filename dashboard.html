@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Backtrader — EMA Cross SAR</title>
+<script src="/vendor/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #11161f; --panel2: #161d29; --border: #232b38;
+    --text: #e6edf3; --muted: #8b96a5; --faint: #5c6773;
+    --green: #3fb950; --red: #f85149; --accent: #58a6ff; --amber: #d29922;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }   /* beat #tab-charts{display:flex} */
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  header { position: sticky; top: 0; z-index: 20;
+           display: flex; align-items: center; justify-content: space-between;
+           gap: 16px; padding: 14px 24px;
+           background: rgba(13,17,23,.88); backdrop-filter: blur(6px);
+           border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 50%;
+                background: var(--accent); box-shadow: 0 0 10px var(--accent); flex-shrink: 0; }
+  .brand h1 { margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap; }
+  #meta { display: flex; gap: 6px; flex-wrap: wrap; }
+  @media (max-width: 1150px) { #meta { display: none; } }
+  @media (max-width: 700px) {
+    header { flex-wrap: wrap; }
+    .brand h1 { white-space: normal; font-size: 15px; }
+    aside { width: 190px; }
+  }
+  #meta .chip { font-size: 11px; color: var(--muted); background: var(--panel2);
+                border: 1px solid var(--border); border-radius: 999px;
+                padding: 2px 10px; white-space: nowrap; }
+  .runbox { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  #runstatus { font-size: 12px; color: var(--muted); display: none;
+               align-items: center; gap: 7px; background: var(--panel2);
+               border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; }
+  #runstatus.show { display: inline-flex; }
+  #runstatus::before { content: ''; width: 7px; height: 7px; border-radius: 50%;
+                       background: var(--faint); flex-shrink: 0; }
+  #runstatus.running::before { background: var(--amber); animation: pulse 1.2s infinite; }
+  #runstatus.done::before { background: var(--green); }
+  #runstatus.error::before { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #runbtn { background: #238636; color: #fff; border: 1px solid #2ea043;
+            border-radius: 8px; padding: 8px 18px; font-size: 13px;
+            font-weight: 600; cursor: pointer; transition: background .15s; }
+  #runbtn:hover:not(:disabled) { background: #2ea043; }
+  #runbtn:disabled { background: var(--panel2); border-color: var(--border);
+                     color: var(--faint); cursor: default; }
+
+  /* ---------- tabs ---------- */
+  nav { display: flex; gap: 6px; padding: 12px 24px 0; max-width: 1500px;
+        margin: 0 auto; width: 100%; }
+  nav button { background: transparent; border: 1px solid transparent;
+               border-radius: 8px; color: var(--muted); padding: 7px 18px;
+               font-size: 13.5px; font-weight: 500; cursor: pointer; }
+  nav button:hover { color: var(--text); background: var(--panel); }
+  nav button.active { color: var(--text); background: var(--panel);
+                      border-color: var(--border); }
+
+  main { padding: 16px 24px 40px; max-width: 1500px; margin: 0 auto; }
+
+  /* ---------- shared panel ---------- */
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: var(--radius); overflow: hidden; }
+  .panel-h { display: flex; align-items: center; justify-content: space-between;
+             padding: 10px 16px; font-size: 11.5px; font-weight: 600;
+             letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+             border-bottom: 1px solid var(--border); background: var(--panel2); }
+  .panel-b { padding: 16px; }
+
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .note { color: var(--muted); font-size: 12px; }
+  .note a { color: var(--accent); text-decoration: none; }
+  .note a:hover { text-decoration: underline; }
+  #empty { color: var(--muted); padding: 80px 0; text-align: center; font-size: 15px; }
+
+  /* ---------- charts tab ---------- */
+  #tab-charts { display: flex; gap: 16px; align-items: flex-start; }
+  aside { width: 250px; flex-shrink: 0; position: sticky; top: 76px; }
+  #symsearch { width: 100%; padding: 8px 12px; border-radius: 8px;
+               border: 1px solid var(--border); background: var(--panel);
+               color: var(--text); margin-bottom: 10px; outline: none;
+               transition: border-color .15s; }
+  #symsearch:focus { border-color: var(--accent); }
+  #symsearch::placeholder { color: var(--faint); }
+  #symlist { list-style: none; margin: 0; padding: 4px; max-height: calc(100vh - 190px);
+             overflow-y: auto; background: var(--panel);
+             border: 1px solid var(--border); border-radius: var(--radius); }
+  #symlist li { display: flex; justify-content: space-between; align-items: center;
+                padding: 7px 12px; margin: 1px 0; cursor: pointer;
+                border-radius: 7px; font-size: 13px; border-left: 2px solid transparent; }
+  #symlist li:hover { background: var(--panel2); }
+  #symlist li.sel { background: var(--panel2); border-left-color: var(--accent); }
+  #symlist li .pnl { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  #symlist::-webkit-scrollbar { width: 8px; }
+  #symlist::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  #symlist::-webkit-scrollbar-track { background: transparent; }
+
+  #chartpane { flex: 1; min-width: 0; }
+  #symstats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+  #symstats .stat { background: var(--panel); border: 1px solid var(--border);
+                    border-radius: 8px; padding: 8px 16px; display: flex;
+                    flex-direction: column; gap: 1px; min-width: 110px; }
+  #symstats .stat .k { font-size: 10.5px; color: var(--muted);
+                       text-transform: uppercase; letter-spacing: .07em; }
+  #symstats .stat .v { font-size: 15px; font-weight: 600;
+                       font-variant-numeric: tabular-nums; }
+  #chartwrap { border: 1px solid var(--border); border-radius: var(--radius);
+               overflow: hidden; background: var(--panel); }
+  #chartdiv { width: 100%; height: 560px; }
+  #charthint { margin: 8px 4px 0; text-align: right; color: var(--faint); }
+  #positions { margin-top: 16px; }
+  .posempty { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+  .poshead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px;
+             font-size: 13px; color: var(--muted); }
+  .poshead b { color: var(--text); font-size: 14px; }
+  .posscroll { max-height: 340px; overflow-y: auto;
+               border: 1px solid var(--border); border-radius: var(--radius); }
+  #postbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #postbl th, #postbl td { padding: 6px 12px; text-align: left; white-space: nowrap; }
+  #postbl th { position: sticky; top: 0; background: var(--panel2);
+               color: var(--muted); font-weight: 600; z-index: 1;
+               border-bottom: 1px solid var(--border); }
+  #postbl td.num, #postbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #postbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #postbl tbody tr:hover td { background: var(--panel2); }
+  .side { font-weight: 600; font-size: 11px; padding: 1px 7px; border-radius: 4px; }
+  .side.long { color: var(--green); background: rgba(63,185,80,.12); }
+  .side.short { color: var(--red); background: rgba(248,81,73,.12); }
+
+  /* ---------- account tab ---------- */
+  #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+           gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 14px 16px; }
+  .card .k { color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+             letter-spacing: .07em; }
+  .card .v { font-size: 21px; font-weight: 600; margin-top: 4px;
+             font-variant-numeric: tabular-nums; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+           align-items: start; margin-top: 16px; }
+  @media (max-width: 1100px) { .grid2 { grid-template-columns: 1fr; } }
+
+  #equity { width: 100%; display: block; }
+
+  #pfstats { border-collapse: collapse; font-size: 13px; width: 100%; }
+  #pfstats td { padding: 6px 12px; border-bottom: 1px solid var(--border); }
+  #pfstats tr:last-child td { border-bottom: 0; }
+  #pfstats tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #pfstats td:first-child { color: var(--muted); }
+  #pfstats td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+
+  #pfimgs img { width: 100%; display: block; border-radius: 8px;
+                border: 1px solid var(--border); background: #fff; }
+  #pfimgs img + img { margin-top: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="dot"></div>
+    <h1>Backtrader — EMA Cross Stop&amp;Reverse</h1>
+    <div id="meta"></div>
+  </div>
+  <div class="runbox">
+    <span id="runstatus"></span>
+    <button id="runbtn">Run Backtest</button>
+  </div>
+</header>
+<nav>
+  <button class="tab active" data-tab="charts">Charts</button>
+  <button class="tab" data-tab="account">Account</button>
+</nav>
+<main>
+  <div id="empty" hidden>No results yet — press <b>Run Backtest</b>.</div>
+
+  <section id="tab-charts">
+    <aside>
+      <input id="symsearch" placeholder="Filter symbols...">
+      <ul id="symlist"></ul>
+    </aside>
+    <div id="chartpane">
+      <div id="symstats"></div>
+      <div id="chartwrap"><div id="chartdiv"></div></div>
+      <p class="note" id="charthint">Scroll to zoom · drag to pan · double-click to reset</p>
+      <div id="positions"></div>
+    </div>
+  </section>
+
+  <section id="tab-account" hidden>
+    <div id="cards"></div>
+
+    <div class="panel">
+      <div class="panel-h">Equity curve</div>
+      <div class="panel-b"><canvas id="equity" width="1400" height="300"></canvas></div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <div class="panel-h">Portfolio stats · corrected (minute, 24/7 annualized)</div>
+        <div class="panel-b">
+          <div id="pferror" class="note"></div>
+          <table id="pfstats"></table>
+          <p class="note" style="margin:10px 0 0">Computed from minute returns via
+             empyrical — not pyfolio's daily-assumption numbers.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">
+          <span>Pyfolio tear sheet</span>
+          <span class="note"><a href="/api/download/pyfolio">download zip</a></span>
+        </div>
+        <div class="panel-b">
+          <div id="pfimgs"></div>
+          <p class="note" style="margin:10px 0 0">Minute returns fed as daily so the
+             charts populate — the tear sheet's own embedded numbers therefore use
+             pyfolio's daily basis; trust the corrected stats on the left. Archived
+             per run under <code>reports/test_data/</code> (incl. per-symbol position logs).</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+let R = null;          // results.json
+let selected = null;   // selected symbol
+
+const $ = id => document.getElementById(id);
+const fmt = (v, d=2) => v == null ? '—' :
+      Number(v).toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: d});
+
+/* ---- tabs ---- */
+document.querySelectorAll('nav .tab').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav .tab').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  $('tab-charts').hidden = b.dataset.tab !== 'charts';
+  $('tab-account').hidden = b.dataset.tab !== 'account';
+});
+
+/* ---- charts tab ---- */
+function renderSymbols() {
+  const q = $('symsearch').value.toUpperCase();
+  const per = R.per_symbol || {};
+  const syms = Object.keys(per)
+    .filter(s => s.includes(q))
+    .sort((a, b) => per[b].pnl - per[a].pnl);
+  $('symlist').innerHTML = syms.map(s => {
+    const p = per[s].pnl;
+    return `<li data-sym="${s}" class="${s===selected?'sel':''}">
+      <span>${s}</span>
+      <span class="pnl ${p>=0?'pos':'neg'}">${fmt(p)}</span></li>`;
+  }).join('');
+  $('symlist').querySelectorAll('li').forEach(li =>
+    li.onclick = () => selectSymbol(li.dataset.sym));
+}
+
+function selectSymbol(sym) {
+  selected = sym;
+  renderSymbols();
+  const s = (R.per_symbol || {})[sym] || {trades: 0, pnl: 0, won: 0};
+  const wr = s.trades ? (100 * s.won / s.trades) : null;
+  const stat = (k, v, cls='') =>
+    `<div class="stat"><span class="k">${k}</span><span class="v ${cls}">${v}</span></div>`;
+  $('symstats').innerHTML =
+    stat('Symbol', sym) +
+    stat('Trades', s.trades) +
+    stat('PnL (USDT)', fmt(s.pnl), s.pnl>=0?'pos':'neg') +
+    stat('Win rate', wr==null?'—':fmt(wr,1)+'%');
+  if ((R.charts || []).includes(sym)) {
+    $('chartwrap').style.display = '';
+    $('charthint').style.display = '';
+    loadChart(sym);
+  } else {
+    $('chartwrap').style.display = 'none';
+    $('charthint').style.display = 'none';
+    $('positions').innerHTML = '';
+  }
+}
+$('symsearch').oninput = renderSymbols;
+
+/* ---- interactive candlestick chart (lightweight-charts) ---- */
+let chart = null, resizeObs = null, chartGen = 0;
+
+// Per-stock position log: one row per closed position (open -> close).
+function renderPositions(sym, positions) {
+  const box = $('positions');
+  if (!positions.length) {
+    box.innerHTML = `<div class="posempty">No positions for ${sym}.</div>`;
+    return;
+  }
+  const dt = s => (s || '').slice(0, 19).replace('T', ' ');
+  const rows = positions.map((p, i) => {
+    const net = p.pnlcomm;
+    return `<tr>
+      <td>${i + 1}</td>
+      <td><span class="side ${p.side === 'LONG' ? 'long' : 'short'}">${p.side}</span></td>
+      <td>${dt(p.entry_dt)}</td>
+      <td>${dt(p.exit_dt)}</td>
+      <td class="num">${fmt(p.entry_price, 6)}</td>
+      <td class="num">${fmt(p.exit_price, 6)}</td>
+      <td class="num">${fmt(p.size, 4)}</td>
+      <td class="num">${p.bars_held ?? '—'}</td>
+      <td class="num ${net >= 0 ? 'pos' : 'neg'}">${fmt(net)}</td>
+    </tr>`;
+  }).join('');
+  const total = positions.reduce((a, p) => a + p.pnlcomm, 0);
+  box.innerHTML =
+    `<div class="poshead">
+       <b>${sym}</b> — ${positions.length} position${positions.length > 1 ? 's' : ''}
+       <span class="${total >= 0 ? 'pos' : 'neg'}">net ${fmt(total)} USDT</span>
+     </div>
+     <div class="posscroll"><table id="postbl">
+       <thead><tr><th>#</th><th>Side</th><th>Entry</th><th>Exit</th>
+         <th class="num">Entry px</th><th class="num">Exit px</th>
+         <th class="num">Size</th><th class="num">Bars</th>
+         <th class="num">Net PnL</th></tr></thead>
+       <tbody>${rows}</tbody>
+     </table></div>`;
+}
+
+async function loadChart(sym) {
+  const el = $('chartdiv');
+  const gen = ++chartGen;   // guard against overlapping loads racing
+  // Tear down any previous chart so switching symbols doesn't leak instances.
+  if (chart) { chart.remove(); chart = null; }
+  if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
+
+  let cd;
+  try {
+    cd = await (await fetch(`/reports/chartdata/${sym}.json?v=${encodeURIComponent(R.generated)}`)).json();
+  } catch (e) { return; }
+  if (gen !== chartGen) return;   // a newer load started while we awaited
+
+  renderPositions(sym, cd.positions || []);
+
+  // Never create the chart at 0 width — if the pane hasn't laid out yet the
+  // chart would render invisible and not always recover. Fall back to the
+  // parent/viewport width, then correct once real width is known.
+  const initW = el.clientWidth || el.parentElement.clientWidth
+                || Math.max(320, window.innerWidth - 300);
+  chart = LightweightCharts.createChart(el, {
+    width: initW, height: 560,
+    layout: { background: { color: '#11161f' }, textColor: '#c9d1d9' },
+    grid: { vertLines: { color: '#1b2230' }, horzLines: { color: '#1b2230' } },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#232b38' },
+    rightPriceScale: { borderColor: '#232b38' },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+
+  const candle = chart.addCandlestickSeries({
+    upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
+    wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+  });
+  candle.setData(cd.candles || []);
+
+  // Overlay lines come straight from the strategy's build_chart_lines().
+  (cd.lines || []).forEach(L => {
+    const s = chart.addLineSeries({
+      color: L.color || '#58a6ff', lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: false, title: L.name || '',
+    });
+    s.setData(L.points || []);
+  });
+
+  candle.setMarkers(cd.markers || []);
+  chart.timeScale().fitContent();
+
+  // Correct the width once the pane has settled (covers the case where
+  // clientWidth was 0/stale at creation), and keep it in sync thereafter.
+  const sync = () => { const w = el.clientWidth; if (w > 0 && chart) chart.applyOptions({ width: w }); };
+  requestAnimationFrame(sync);
+  resizeObs = new ResizeObserver(sync);
+  resizeObs.observe(el);
+}
+
+/* ---- account tab ---- */
+// Annualized returns/vol come from run_backtest as fractions (0.29 = 29%).
+const pct = v => v == null ? '—' : fmt(v * 100, 2) + '%';
+const num = v => v == null ? '—' : fmt(v, 4);
+
+function renderAccount() {
+  const s = R.summary || {};
+  const cards = [
+    ['End value', fmt(s.end_value) + ' USDT', null],
+    ['PnL', fmt(s.pnl) + ' USDT', s.pnl],
+    ['Return', fmt(s.return_pct, 3) + '%', s.return_pct],
+    ['Trades', s.trades_closed, null],
+    ['Win rate', s.win_rate_pct == null ? '—' : fmt(s.win_rate_pct, 1) + '%', null],
+    ['Max drawdown', fmt(s.max_drawdown_pct, 2) + '%', null],
+    // Two annualization conventions: arithmetic (returns add) vs CAGR (compound).
+    ['Ann. return (CAGR)', pct(s.annual_return_cagr), s.annual_return_cagr],
+    ['Ann. volatility (returns)', pct(s.annual_volatility_returns), null],
+    ['Ann. volatility (log)', pct(s.annual_volatility_log_returns), null],
+    ['Sharpe (arithmetic)', num(s.sharpe_arithmetic), s.sharpe_arithmetic],
+    ['Sharpe (log)', num(s.sharpe_log_returns), s.sharpe_log_returns],
+    ['Symbols', s.symbols, null],
+  ];
+  $('cards').innerHTML = cards.map(([k, v, sign]) =>
+    `<div class="card"><div class="k">${k}</div>
+     <div class="v ${sign==null?'':(sign>=0?'pos':'neg')}">${v}</div></div>`).join('');
+
+  drawEquity(R.equity || []);
+
+  const pf = R.pyfolio || {};
+  $('pferror').textContent = pf.error ? '⚠ ' + pf.error : '';
+  // Integer counters (trade counts) shouldn't render as "74.0000".
+  const statVal = v => v == null ? '—' : (Number.isInteger(v) ? v.toLocaleString('en-US') : fmt(v, 4));
+  $('pfstats').innerHTML = Object.entries(pf.stats || {})
+    .map(([k, v]) => `<tr><td>${k}</td><td>${statVal(v)}</td></tr>`).join('');
+  const pfdir = pf.dir || 'reports/pyfolio';   // per-run archive folder
+  $('pfimgs').innerHTML = (pf.images || [])
+    .map(i => `<img src="/${pfdir}/${i}?v=${encodeURIComponent(R.generated)}">`).join('');
+}
+
+function drawEquity(eq) {
+  const c = $('equity'), ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (eq.length < 2) return;
+  const vals = eq.map(p => p[1]);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const pad = 40, w = c.width - pad * 2, h = c.height - pad * 2;
+  const y = v => pad + h - (max === min ? h / 2 : (v - min) / (max - min) * h);
+  const x = i => pad + i / (eq.length - 1) * w;
+
+  ctx.strokeStyle = '#232b38';
+  ctx.beginPath();
+  const y0 = y(eq[0][1]);
+  ctx.moveTo(pad, y0); ctx.lineTo(pad + w, y0);
+  ctx.stroke();
+
+  const up = vals[vals.length-1] >= vals[0];
+  // soft fill under the line
+  const grad = ctx.createLinearGradient(0, pad, 0, pad + h);
+  grad.addColorStop(0, up ? 'rgba(63,185,80,.18)' : 'rgba(248,81,73,.18)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath();
+  eq.forEach((p, i) => i ? ctx.lineTo(x(i), y(p[1])) : ctx.moveTo(x(0), y(p[1])));
+  ctx.lineTo(x(eq.length-1), pad + h); ctx.lineTo(x(0), pad + h); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  eq.forEach((p, i) => i ? ctx.lineTo(x(i), y(p[1])) : ctx.moveTo(x(0), y(p[1])));
+  ctx.stroke();
+
+  ctx.fillStyle = '#8b96a5'; ctx.font = '11px sans-serif';
+  ctx.fillText(fmt(max), 4, y(max) + 4);
+  ctx.fillText(fmt(min), 4, y(min) + 4);
+  ctx.fillText(eq[0][0].slice(0, 16), pad, c.height - 8);
+  const last = eq[eq.length - 1][0].slice(0, 16);
+  ctx.fillText(last, c.width - ctx.measureText(last).width - 8, c.height - 8);
+}
+
+/* ---- load + run ---- */
+async function loadResults() {
+  const r = await fetch('/api/results');
+  if (!r.ok) { $('empty').hidden = false; return; }
+  R = await r.json();
+  $('empty').hidden = true;
+  const chip = t => `<span class="chip">${t}</span>`;
+  // Params are whatever the selected strategy declared — render them generically.
+  const P = R.params || {};
+  const hidden = new Set(['strategy', 'window_start', 'window_end', 'leverage']);
+  $('meta').innerHTML =
+    (P.strategy ? chip(`<b>${P.strategy}</b>`) : '') +
+    Object.entries(P).filter(([k]) => !hidden.has(k))
+                     .map(([k, v]) => chip(`${k.replace(/_/g, ' ')}: ${v}`)).join('') +
+    chip(`generated ${R.generated.slice(0, 19).replace('T', ' ')}`);
+  renderSymbols();
+  renderAccount();
+  if (!selected) {
+    const per = R.per_symbol || {};
+    const first = Object.keys(per).sort((a, b) => per[b].pnl - per[a].pnl)[0];
+    if (first) selectSymbol(first);
+  } else {
+    selectSymbol(selected);
+  }
+}
+
+let pollTimer = null;
+async function poll() {
+  const st = await (await fetch('/api/status')).json();
+  const el = $('runstatus');
+  const setStatus = (cls, txt) => {
+    el.className = txt ? 'show ' + cls : '';
+    el.textContent = txt;
+  };
+  if (st.state === 'running') {
+    $('runbtn').disabled = true;
+    let txt = 'running: ' + (st.phase || '...');
+    if (st.done != null && st.total) txt += ` ${st.done}/${st.total}`;
+    setStatus('running', txt);
+  } else {
+    $('runbtn').disabled = false;
+    clearInterval(pollTimer); pollTimer = null;
+    if (st.state === 'done') {
+      setStatus('done', `done in ${st.elapsed}s · pnl ${fmt(st.pnl)}`);
+      loadResults();
+    } else if (st.state === 'error') {
+      setStatus('error', 'error: ' + (st.error || 'unknown'));
+    } else {
+      setStatus('', '');
+    }
+  }
+}
+
+$('runbtn').onclick = async () => {
+  const r = await fetch('/api/run', {method: 'POST'});
+  if (r.ok || r.status === 409) {
+    $('runbtn').disabled = true;
+    if (!pollTimer) pollTimer = setInterval(poll, 2000);
+    poll();
+  }
+};
+
+loadResults();
+poll().then(() => {  // resume polling if a run is already in progress
+  if ($('runbtn').disabled && !pollTimer) pollTimer = setInterval(poll, 2000);
+});
+</script>
+</body>
+</html>
