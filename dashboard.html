@@ -114,9 +114,19 @@
                        text-transform: uppercase; letter-spacing: .07em; }
   #symstats .stat .v { font-size: 15px; font-weight: 600;
                        font-variant-numeric: tabular-nums; }
-  #chartwrap { border: 1px solid var(--border); border-radius: var(--radius);
-               overflow: hidden; background: var(--panel); }
+  #chartwrap { position: relative; border: 1px solid var(--border);
+               border-radius: var(--radius); overflow: hidden; background: var(--panel); }
   #chartdiv { width: 100%; height: 560px; }
+  /* Above lightweight-charts' own canvases (which have their own z-index and
+     an opaque background) so the shading is actually visible; pointer-events
+     off so zoom/pan still reach the chart underneath. */
+  #posoverlay { position: absolute; top: 0; left: 0; z-index: 4; pointer-events: none; }
+  #chartcontrols { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+                   margin: 0 0 10px; font-size: 13px; user-select: none; }
+  #chartcontrols label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  #chartcontrols input { cursor: pointer; }
+  #linetoggles { display: inline-flex; flex-wrap: wrap; gap: 8px 14px; }
+  #linetoggles .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
   #charthint { margin: 8px 4px 0; text-align: right; color: var(--faint); }
   #positions { margin-top: 16px; }
   .posempty { color: var(--muted); font-size: 13px; padding: 8px 2px; }
@@ -132,7 +142,9 @@
                border-bottom: 1px solid var(--border); }
   #postbl td.num, #postbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
   #postbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #postbl tbody tr { cursor: pointer; }
   #postbl tbody tr:hover td { background: var(--panel2); }
+  #postbl tbody tr.selrow td { background: rgba(88,166,255,.14); }
   .side { font-weight: 600; font-size: 11px; padding: 1px 7px; border-radius: 4px; }
   .side.long { color: var(--green); background: rgba(63,185,80,.12); }
   .side.short { color: var(--red); background: rgba(248,81,73,.12); }
@@ -191,8 +203,16 @@
     </aside>
     <div id="chartpane">
       <div id="symstats"></div>
-      <div id="chartwrap"><div id="chartdiv"></div></div>
-      <p class="note" id="charthint">Scroll to zoom · drag to pan · double-click to reset</p>
+      <div id="chartcontrols">
+        <label><input type="checkbox" id="shadechk"> Shade positions</label>
+        <label><input type="checkbox" id="markerschk" checked> Buy/Sell markers</label>
+        <span id="linetoggles"></span>
+      </div>
+      <div id="chartwrap">
+        <div id="chartdiv"></div>
+        <canvas id="posoverlay"></canvas>
+      </div>
+      <p class="note" id="charthint">Scroll to zoom · drag to pan · double-click to reset · click a row below to jump to it</p>
       <div id="positions"></div>
     </div>
   </section>
@@ -291,6 +311,88 @@ $('symsearch').oninput = renderSymbols;
 
 /* ---- interactive candlestick chart (lightweight-charts) ---- */
 let chart = null, resizeObs = null, chartGen = 0;
+let curPositions = [], selPos = -1;
+let candleSeries = null, curMarkers = [];   // for the markers toggle
+
+// Position datetimes are naive UTC (e.g. "2026-07-08T06:26:59"); chart times
+// are epoch seconds. Parse as UTC to line them up.
+const toEpoch = iso => {
+  if (!iso) return null;
+  const s = /[Zz]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z';
+  return Math.floor(Date.parse(s) / 1000);
+};
+
+// Draw the green/red position shading on the overlay canvas, synced to the
+// chart's visible time range. Called on pan/zoom/resize and toggle.
+function drawPosOverlay() {
+  const cv = $('posoverlay'), el = $('chartdiv');
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = el.clientWidth, h = el.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) {
+    cv.width = w * dpr; cv.height = h * dpr;
+    cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (!chart || !$('shadechk').checked || !curPositions.length) return;
+
+  const ts = chart.timeScale();
+  const vr = ts.getVisibleRange();
+  if (!vr) return;
+  curPositions.forEach((p, i) => {
+    const e = toEpoch(p.entry_dt), x = toEpoch(p.exit_dt);
+    if (e == null || x == null || x < vr.from || e > vr.to) return;   // off-screen
+    
+    let xa = ts.timeToCoordinate(Math.max(e, vr.from));
+    let xb = ts.timeToCoordinate(Math.min(x, vr.to));
+    if (xa == null || xb == null) return;
+    if (xb < xa) { const t = xa; xa = xb; xb = t; }
+    const win = p.pnlcomm >= 0;
+    ctx.fillStyle = win ? 'rgba(38,166,154,0.20)' : 'rgba(239,83,80,0.20)';
+    ctx.fillRect(xa, 0, Math.max(1, xb - xa), h);
+    if (i === selPos) {                       // outline the selected position
+      ctx.strokeStyle = win ? 'rgba(38,166,154,0.95)' : 'rgba(239,83,80,0.95)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(xa + 0.5, 1, Math.max(1, xb - xa) - 1, h - 2);
+    }
+  });
+}
+
+// Clicking a position row zooms the chart to that trade's window.
+function focusPosition(i) {
+  const p = curPositions[i];
+  if (!p || !chart) return;
+  selPos = i;
+  const e = toEpoch(p.entry_dt), x = toEpoch(p.exit_dt);
+  const pad = Math.max(60, (x - e) * 0.4);    // 40% padding, min 1 minute
+  chart.timeScale().setVisibleRange({ from: e - pad, to: x + pad });
+  document.querySelectorAll('#postbl tbody tr').forEach((tr, j) =>
+    tr.classList.toggle('selrow', j === i));
+  requestAnimationFrame(drawPosOverlay);
+}
+$('shadechk').onchange = drawPosOverlay;
+
+// Show/hide the buy/sell markers (uses the checkbox state).
+function applyMarkers() {
+  if (candleSeries) candleSeries.setMarkers($('markerschk').checked ? curMarkers : []);
+}
+$('markerschk').onchange = applyMarkers;
+
+// Build one checkbox per strategy line (Kalman, +/- sigma, EMAs, ...).
+function buildLineToggles(lineSeries) {
+  const box = $('linetoggles');
+  box.innerHTML = '';
+  lineSeries.forEach(L => {
+    const lbl = document.createElement('label');
+    lbl.innerHTML = `<input type="checkbox" checked>
+      <span class="swatch" style="background:${L.color}"></span>${L.name}`;
+    lbl.querySelector('input').onchange = e =>
+      L.series.applyOptions({ visible: e.target.checked });
+    box.appendChild(lbl);
+  });
+}
 
 // Per-stock position log: one row per closed position (open -> close).
 function renderPositions(sym, positions) {
@@ -327,6 +429,8 @@ function renderPositions(sym, positions) {
          <th class="num">Net PnL</th></tr></thead>
        <tbody>${rows}</tbody>
      </table></div>`;
+  box.querySelectorAll('#postbl tbody tr').forEach((tr, i) =>
+    tr.onclick = () => focusPosition(i));
 }
 
 async function loadChart(sym) {
@@ -335,6 +439,7 @@ async function loadChart(sym) {
   // Tear down any previous chart so switching symbols doesn't leak instances.
   if (chart) { chart.remove(); chart = null; }
   if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
+  { const cv = $('posoverlay'); if (cv) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); }
 
   let cd;
   try {
@@ -342,7 +447,9 @@ async function loadChart(sym) {
   } catch (e) { return; }
   if (gen !== chartGen) return;   // a newer load started while we awaited
 
-  renderPositions(sym, cd.positions || []);
+  curPositions = cd.positions || [];
+  selPos = -1;
+  renderPositions(sym, curPositions);
 
   // Never create the chart at 0 width — if the pane hasn't laid out yet the
   // chart would render invisible and not always recover. Fall back to the
@@ -353,7 +460,7 @@ async function loadChart(sym) {
     width: initW, height: 560,
     layout: { background: { color: '#11161f' }, textColor: '#c9d1d9' },
     grid: { vertLines: { color: '#1b2230' }, horzLines: { color: '#1b2230' } },
-    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#232b38' },
+    timeScale: { timeVisible: true, secondsVisible: false, borderColor: '#232b38', minBarSpacing: 0.1,},
     rightPriceScale: { borderColor: '#232b38' },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
@@ -363,22 +470,34 @@ async function loadChart(sym) {
     wickUpColor: '#26a69a', wickDownColor: '#ef5350',
   });
   candle.setData(cd.candles || []);
+  candleSeries = candle;
 
   // Overlay lines come straight from the strategy's build_chart_lines().
-  (cd.lines || []).forEach(L => {
+  // Keep the series + a per-line toggle so each can be shown/hidden.
+  const lineSeries = (cd.lines || []).map(L => {
     const s = chart.addLineSeries({
       color: L.color || '#58a6ff', lineWidth: 1,
       priceLineVisible: false, lastValueVisible: false, title: L.name || '',
     });
     s.setData(L.points || []);
+    return { name: L.name || '', color: L.color || '#58a6ff', series: s };
   });
+  buildLineToggles(lineSeries);
 
-  candle.setMarkers(cd.markers || []);
+  curMarkers = cd.markers || [];
+  applyMarkers();     // respects the current Buy/Sell markers checkbox
   chart.timeScale().fitContent();
+
+  // Redraw the position shading whenever the visible range changes (pan/zoom).
+  chart.timeScale().subscribeVisibleTimeRangeChange(drawPosOverlay);
 
   // Correct the width once the pane has settled (covers the case where
   // clientWidth was 0/stale at creation), and keep it in sync thereafter.
-  const sync = () => { const w = el.clientWidth; if (w > 0 && chart) chart.applyOptions({ width: w }); };
+  const sync = () => {
+    const w = el.clientWidth;
+    if (w > 0 && chart) chart.applyOptions({ width: w });
+    drawPosOverlay();
+  };
   requestAnimationFrame(sync);
   resizeObs = new ResizeObserver(sync);
   resizeObs.observe(el);

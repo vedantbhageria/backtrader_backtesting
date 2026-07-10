@@ -33,8 +33,8 @@ class KalmanTest(PortfolioStrategy):
         ('k', 2.0),            # threshold in std devs of the innovation
         ('a', 7.0),             # stop loss this much above value
         ('warmup', 30),        # bars used to initialize each filter
-        ('q_level', 1e-3),     # process noise on level (relative to est. R)
-        ('q_vel', 1e-6),       # process noise on slope (relative to est. R)
+        ('q_level', 0.2e-3),     # process noise on level (relative to est. R)
+        ('q_vel', 0.2e-6),       # process noise on slope (relative to est. R)
         ('reversion', False),  # True: fade the deviation; False: follow it
     )
 

@@ -1,0 +1,16 @@
+setting,value
+strategy,KalmanTest
+param.trade_usd,2000.0
+param.k,3
+param.a,7
+param.warmup,180
+param.reversion,False
+broker.starting_cash,100000.0
+broker.leverage,10
+broker.commission,0.0002
+broker.commission_pct_per_side,0.0200%
+risk_free_annual,0.06
+window_start,2026-06-09T08:48:59.999000
+window_end,2026-07-09T08:48:59.999000
+backtest_days,30
+symbols,100

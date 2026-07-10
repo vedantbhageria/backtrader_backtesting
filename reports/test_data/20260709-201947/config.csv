@@ -1,0 +1,13 @@
+setting,value
+strategy,EMACrossShortTest
+param.fast_ema_period,60
+param.slow_ema_period,120
+broker.starting_cash,100000.0
+broker.leverage,10
+broker.commission,0.0002
+broker.commission_pct_per_side,0.0200%
+risk_free_annual,0.06
+window_start,2026-07-02T08:48:59.999000
+window_end,2026-07-09T08:48:59.999000
+backtest_days,7
+symbols,100

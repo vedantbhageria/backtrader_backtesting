@@ -31,6 +31,7 @@ RESULTS_PATH = os.path.join(REPORTS, 'results.json')
 
 STARTING_CASH = 100_000.0
 LEVERAGE = 10
+COMMISSION = 0.0002   # per-side, as a fraction of notional (0.0002 = 0.02%)
 
 # ---- risk metrics -------------------------------------------------------
 # Bars are 1-minute and crypto trades 24/7, so a year is 365*24*60 minutes.
@@ -39,7 +40,7 @@ LEVERAGE = 10
 # rf is a PER-MINUTE rate (RISK_FREE_ANNUAL / MINUTES_PER_YEAR), matching how
 # empyrical subtracts risk_free from every return observation.
 MINUTES_PER_YEAR = 365 * 24 * 60
-RISK_FREE_ANNUAL = 0.06   # 4% p.a.; set 0.0 to drop the risk-free term
+RISK_FREE_ANNUAL = 0.06   
 
 # ---- strategy selection -------------------------------------------------
 # Swap the strategy by changing these two lines. Any PortfolioStrategy
@@ -49,10 +50,12 @@ STRATEGY = KalmanTest
 
 STRATEGY_PARAMS = dict(
     trade_usd=2000.0,
-    k=3,
+    k=1.5,
     a=7,
     warmup=180,
     reversion=False,
+    q_level = 0.1e-3,
+    q_vel = 0.1e-6,
 )
 """STRATEGY_PARAMS = dict(
     fast_ema_period =  60,
@@ -63,7 +66,7 @@ STRATEGY_PARAMS = dict(
 # STRATEGY = EMACrossShortTest
 # STRATEGY_PARAMS = dict(trade_usd=2000.0, fast_ema_period=15, slow_ema_period=30)
 
-BACKTEST_DAYS = 3
+BACKTEST_DAYS = 7
 BACKTEST_END = None   # 'YYYY-MM-DD HH:MM' (UTC), or None = latest available bar
 
 
@@ -203,10 +206,7 @@ def _epoch(dt):
     """Naive UTC datetime -> integer epoch seconds (lightweight-charts time)."""
     return int(dt.replace(tzinfo=timezone.utc).timestamp())
 
-def _resample_returns(rets, bars_per_period=60):
-
-    """Compound consecutive minute returns into one return per `bars_per_period`
-    bars (e.g. 60 = hourly). Trailing partial period is dropped."""
+def _resample_returns(rets, bars_per_period=60*24):
 
     out = []
     acc = 1.0
@@ -224,12 +224,15 @@ def _resample_returns(rets, bars_per_period=60):
 
 def _risk_metrics(rets):
 
+    import pandas as pd
+
     r_minute = [x for x in rets if x == x]        # drop NaN
     r = _resample_returns(r_minute)
+    print(r)
     n = len(r)
     if n < 2:
         return {}
-    T = MINUTES_PER_YEAR/60
+    T = MINUTES_PER_YEAR/60 *1/24
 
     mu = sum(r) / n
     var = sum((x - mu) ** 2 for x in r) / (n - 1)      # ddof=1, matches empyrical
@@ -325,7 +328,8 @@ def _dump_chartdata(strat):
     return saved
 
 
-_POS_COLS = ['side', 'size', 'entry_dt', 'exit_dt', 'entry_price',
+_POS_COLS = ['side', 'size', 'entry_signal_dt', 'entry_dt',
+             'exit_signal_dt', 'exit_dt', 'entry_price',
              'exit_price', 'bars_held', 'pnl', 'pnlcomm']
 
 
@@ -363,6 +367,50 @@ def _dump_position_logs(strat, out_dir):
     return len(strat.trade_log)
 
 
+def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols):
+    import csv as _csv
+    rows = [('strategy', STRATEGY.__name__)]
+    eff = {k: getattr(strat.params, k) for k in strat.params._getkeys()}
+    for k, v in eff.items():
+        rows.append(('param.%s' % k, v))
+    rows += [
+        ('broker.starting_cash', STARTING_CASH),
+        ('broker.leverage', LEVERAGE),
+        ('broker.commission', COMMISSION),
+        ('broker.commission_pct_per_side', '%.4f%%' % (COMMISSION * 100)),
+        ('risk_free_annual', RISK_FREE_ANNUAL),
+        ('window_start', bt_start.isoformat()),
+        ('window_end', bt_end.isoformat()),
+        ('backtest_days', BACKTEST_DAYS),
+        ('symbols', n_symbols),
+    ]
+    """with open(os.path.join(out_dir, 'config.csv'), 'w',
+              newline='', encoding='utf-8') as f:
+        w = _csv.writer(f)
+        w.writerow(['setting', 'value'])
+        w.writerows(rows)"""
+    return rows
+
+
+def _write_report_xlsx(out_dir, config_rows, stats, run_tag):
+    try:
+        import pandas as pd
+    except Exception as e:
+        print('[backtest] xlsx skipped (%s)' % e)
+        return
+    cfg = pd.DataFrame(config_rows, columns=['setting', 'value'])
+    ps = pd.Series(stats or {}, dtype=object).rename('value')
+    ps.index.name = 'metric'
+    path = os.path.join(out_dir, 'report.xlsx')
+    with pd.ExcelWriter(path, engine='openpyxl') as xl:
+        cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
+        ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
+
+    path = os.path.join(REPORTS, 'historical_reports.xlsx')
+    with pd.ExcelWriter(path, engine = "openpyxl", mode="a", if_sheet_exists="overlay") as xl:
+        cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
+        ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
+
 def _pyfolio_report(strat, out_dir):
     """Export pyfolio items + tear sheet into out_dir (one folder per run,
     e.g. reports/pyfolio/20260707-153000/ — old runs are never overwritten)."""
@@ -373,9 +421,8 @@ def _pyfolio_report(strat, out_dir):
     returns, positions, transactions, gross_lev = pyf.get_pf_items()
 
     # Always dump the raw items so they can be analyzed elsewhere.
-    returns.to_csv(os.path.join(out_dir, 'returns.csv'))
+    returns.to_csv(os.path.join(out_dir, 'returns_pyfolio.csv'))
     try:
-        positions.to_csv(os.path.join(out_dir, 'positions.csv'))
         transactions.to_csv(os.path.join(out_dir, 'transactions.csv'))
     except Exception:
         pass
@@ -392,18 +439,13 @@ def _pyfolio_report(strat, out_dir):
 
             rm = _risk_metrics(list(r.values))
             raw = {
-                'Cumulative return': rm['cumulative_return'],
+                'Cumulative return': rm.get('cumulative_return'),
+                'Annualised return (CAGR)': rm.get('annual_return_cagr'),
+                'Annual volatility (Return)': rm.get('annual_volatility_returns'),
+                'Annual volatility (Log Return)': rm.get('annual_volatility_log_returns'),
+                'Sharpe ratio (Returns)': rm.get('sharpe_arithmetic'),
+                'Sharpe ratio (log returns)': rm.get('sharpe_log_returns'),
 
-                'Annualised return (CAGR)': rm['annual_return_cagr'],
-  
-                'Annual volatility (Return)': rm['annual_volatility_returns'],
-                
-                'Annual volatility (Log Return)': rm['annual_volatility_log_returns'],
-
-                'Sharpe ratio (Returns)': rm['sharpe_arithmetic'],
-      
-                'Sharpe ratio (log returns)': rm['sharpe_log_returns'],
-   
                 'Sortino ratio':     ep.sortino_ratio(r, annualization=MPY,
                                                       required_return=rf),
                 'Calmar ratio':      ep.calmar_ratio(r, annualization=MPY),
@@ -427,39 +469,21 @@ def _pyfolio_report(strat, out_dir):
             stats['Win rate %'] = (round(100.0 * wins / n_trades, 2)
                                    if n_trades else None)
 
-            # dtype=object keeps the trade counters as ints (pandas would
-            # otherwise upcast the whole series to float -> "2284.0").
-            (pd.Series(stats, dtype=object).rename('value')
+            """(pd.Series(stats, dtype=object).rename('value')
              .to_csv(os.path.join(out_dir, 'perf_stats.csv'),
-                     index_label='metric'))
+                     index_label='metric'))"""
         except Exception as e:
             error = 'stats: %s' % e
 
         try:
             plt.close('all')
-            pf.create_full_tear_sheet(
-                returns,
-                positions=positions,
-                transactions=transactions,
-                round_trips=True)
-            for i, num in enumerate(plt.get_fignums(), 1):
-                name = 'tear_sheet_%02d.png' % i
-                plt.figure(num).savefig(os.path.join(out_dir, name),
-                                        dpi=90, bbox_inches='tight')
-                images.append(name)
+            fig = pf.create_returns_tear_sheet(returns, return_fig=True)
+            fig.savefig(os.path.join(out_dir, 'returns_tear_sheet.png'),
+                        dpi=90, bbox_inches='tight')
+            images.append('returns_tear_sheet.png')
             plt.close('all')
         except Exception as e:
-            error = (error + ' | ' if error else '') + 'full_tear_sheet: %s' % e
-            # Fall back to the simple returns sheet so there's still output.
-            try:
-                plt.close('all')
-                fig = pf.create_returns_tear_sheet(returns, return_fig=True)
-                fig.savefig(os.path.join(out_dir, 'returns_tear_sheet.png'),
-                            dpi=90, bbox_inches='tight')
-                images.append('returns_tear_sheet.png')
-                plt.close('all')
-            except Exception as e2:
-                error += ' | returns_tear_sheet: %s' % e2
+            error = (error + ' | ' if error else '') + 'returns_tear_sheet: %s' % e
     except ImportError:
         error = 'pyfolio not installed (pip install pyfolio-reloaded)'
 
@@ -502,7 +526,7 @@ def run():
 
         cerebro = bt.Cerebro()  # stdstats=True -> BuySell arrows on the plots
         cerebro.broker.setcash(STARTING_CASH)
-        cerebro.broker.setcommission(commission=0.0002, leverage=float(LEVERAGE))
+        cerebro.broker.setcommission(commission=COMMISSION, leverage=float(LEVERAGE))
 
         symbols = _load_feeds(cerebro, bt_start, bt_end)
         if not symbols:
@@ -536,7 +560,8 @@ def run():
         # Risk metrics from the minute-level equity curve. Same helper the
         # pyfolio stats table uses, so the cards and the table always agree.
         eq = [v for _, v in strat.equity]
-        rets = [(b - a) / a for a, b in zip(eq, eq[1:]) if a] if len(eq) > 2 else []
+        rets = [0] + ([(b - a) / a for a, b in zip(eq, eq[1:]) if a] if len(eq) > 2 else [])
+
         rm = _risk_metrics(rets)
         rnd = lambda k, d=4: (None if rm.get(k) is None or rm.get(k) != rm.get(k)
                               else round(rm[k], d))
@@ -582,7 +607,10 @@ def run():
         run_tag = time.strftime('%Y%m%d-%H%M%S')
         run_dir = os.path.join(TEST_DATA_DIR, run_tag)
         pf_images, pf_stats, pf_error = _pyfolio_report(strat, run_dir)
+        import pandas as pd
         n_pos = _dump_position_logs(strat, run_dir)
+        config_rows = _dump_run_config(run_dir, strat, bt_start, bt_end, len(symbols))
+        _write_report_xlsx(run_dir, config_rows, pf_stats, run_tag)   # config + perf_stats
         print('[backtest] report done (%s) -> test_data/%s (%d positions)'
               % (pf_error or 'ok', run_tag, n_pos))
 
@@ -595,8 +623,7 @@ def run():
         # Full position log to CSV (one row per closed position, grouped by
         # symbol then entry time) + capped list in the JSON.
         import csv as _csv
-        cols = ['symbol', 'side', 'size', 'entry_dt', 'exit_dt',
-                'entry_price', 'exit_price', 'bars_held', 'pnl', 'pnlcomm']
+        cols = ['symbol'] + _POS_COLS
         positions = sorted(strat.trade_log,
                            key=lambda t: (t['symbol'], t.get('entry_dt') or ''))
         with open(os.path.join(REPORTS, 'positions.csv'), 'w',

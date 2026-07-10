@@ -1,0 +1,19 @@
+metric,value
+Cumulative return,27.64%
+Annualised return (CAGR),18.478342
+Annual volatility (Return),0.470607
+Annual volatility (Log Return),0.472034
+Sharpe ratio (Returns),6.419044
+Sharpe ratio (log returns),6.167001
+Sortino ratio,8.094375
+Calmar ratio,154.293785
+Max drawdown,-0.119761
+Stability,0.820502
+Tail ratio,1.015232
+Daily VaR (5%),-0.000885
+Skew,-0.681347
+Kurtosis,51.377322
+Total trades,14727
+Winning trades,8696
+Losing trades,6031
+Win rate %,59.05
