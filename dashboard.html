@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Backtrader — EMA Cross SAR</title>
+<title>Backtrader Dashboard</title>
 <script src="/vendor/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
@@ -184,23 +184,135 @@
   #pfimgs img { width: 100%; display: block; border-radius: 8px;
                 border: 1px solid var(--border); background: #fff; }
   #pfimgs img + img { margin-top: 14px; }
+
+  /* ---------- run config panel ---------- */
+  .ghostbtn { background: var(--panel2); color: var(--text);
+              border: 1px solid var(--border); border-radius: 8px;
+              padding: 8px 14px; font-size: 13px; cursor: pointer;
+              transition: border-color .15s; }
+  .ghostbtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .ghostbtn:disabled { color: var(--faint); cursor: default; }
+  .ghostbtn.open { border-color: var(--accent); color: var(--accent); }
+  .syncgroup { display: inline-flex; align-items: center; gap: 6px; }
+  .syncgroup input { width: 64px; background: var(--panel2); color: var(--text);
+                     border: 1px solid var(--border); border-radius: 7px;
+                     padding: 7px 8px; font-size: 13px; outline: none; }
+  .syncgroup input:focus { border-color: var(--accent); }
+  #cfgpanel, #reppanel { max-width: 1500px; margin: 14px auto 0; padding: 0 24px; }
+  #cfgpanel .panel-b, #reppanel .panel-b { display: flex; flex-wrap: wrap;
+                       gap: 14px 22px; align-items: flex-end; }
+  #repstrats { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .repstrat { border: 1px solid var(--border); border-radius: 8px;
+              background: var(--panel2); }
+  .repstrat summary { display: flex; align-items: center; gap: 8px;
+                      padding: 8px 12px; cursor: pointer; font-size: 13px;
+                      list-style: none; user-select: none; }
+  .repstrat summary::before { content: '▸'; color: var(--faint); font-size: 11px; }
+  .repstrat[open] summary::before { content: '▾'; }
+  .repstrat .repparams { display: flex; flex-wrap: wrap; gap: 10px 18px;
+                         padding: 4px 14px 12px; }
+  #repbuild { background: #238636; color: #fff; border: 1px solid #2ea043;
+              border-radius: 7px; padding: 5px 14px; font-size: 12px;
+              font-weight: 600; cursor: pointer; text-transform: none;
+              letter-spacing: 0; }
+  #repbuild:hover:not(:disabled) { background: #2ea043; }
+  #repbuild:disabled { background: var(--panel2); border-color: var(--border);
+                       color: var(--faint); cursor: default; }
+  .cfgfield { display: flex; flex-direction: column; gap: 4px; }
+  .cfgfield label { font-size: 10.5px; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: .07em; }
+  .cfgfield input[type=number], .cfgfield input[type=text], .cfgfield select {
+      background: var(--panel2); color: var(--text); font-size: 13px;
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 6px 10px; width: 130px; outline: none; }
+  .cfgfield input:focus, .cfgfield select:focus { border-color: var(--accent); }
+  .cfgfield.chk { flex-direction: row; align-items: center; gap: 7px;
+                  padding-bottom: 7px; }
+  .cfgfield.chk label { text-transform: none; letter-spacing: 0; font-size: 13px;
+                        color: var(--text); cursor: pointer; }
+  #cfgreset { font-size: 12px; color: var(--accent); cursor: pointer;
+              background: none; border: none; padding: 6px 0; }
+  #cfgreset:hover { text-decoration: underline; }
+  #cfgnote { flex-basis: 100%; }
+
+  /* ---------- history tab ---------- */
+  #histtbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #histtbl th, #histtbl td { padding: 7px 14px; text-align: left; white-space: nowrap; }
+  #histtbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+                font-weight: 600; border-bottom: 1px solid var(--border); z-index: 1; }
+  #histtbl td.num, #histtbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #histtbl tbody tr { cursor: pointer; }
+  #histtbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #histtbl tbody tr:hover td { background: var(--panel2); }
+  #histtbl tr.histdetail td { background: var(--panel2) !important; cursor: default;
+                              white-space: normal; }
+  #histtbl tr.histdetail .chip { margin: 2px 4px 2px 0; display: inline-block;
+                                 font-size: 11px; color: var(--muted);
+                                 background: var(--panel); border: 1px solid var(--border);
+                                 border-radius: 999px; padding: 2px 10px; }
+  .histscroll { max-height: calc(100vh - 240px); overflow-y: auto; }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">
     <div class="dot"></div>
-    <h1>Backtrader — EMA Cross Stop&amp;Reverse</h1>
+    <h1>Backtrader Dashboard</h1>
     <div id="meta"></div>
   </div>
   <div class="runbox">
     <span id="runstatus"></span>
+    <span id="syncstatus" class="note"></span>
+    <span class="syncgroup" title="Incremental data sync (same as launch.bat): downloads only the bars missing from postgres over the last N days">
+      <input id="syncdays" type="number" min="1" step="1" value="180">
+      <button id="syncbtn" class="ghostbtn">Sync Data</button>
+    </span>
+    <span id="repstatus" class="note"></span>
+    <button id="repbtn" class="ghostbtn" title="Rebuild the KF vs EKF vs EM comparison report">Report</button>
+    <button id="cfgbtn" class="ghostbtn" title="Strategy &amp; parameters">⚙ Config</button>
     <button id="runbtn">Run Backtest</button>
   </div>
 </header>
+<div id="cfgpanel" hidden>
+  <div class="panel">
+    <div class="panel-h"><span>Run configuration</span>
+      <button id="cfgreset">reset to defaults</button></div>
+    <div class="panel-b" id="cfgbody">
+      <div class="cfgfield">
+        <label for="cfgstrategy">Strategy</label>
+        <select id="cfgstrategy"></select>
+      </div>
+      <div class="cfgfield">
+        <label for="cfgdays">Backtest days</label>
+        <input id="cfgdays" type="number" min="1" step="1">
+      </div>
+      <span id="cfgparams" style="display:contents"></span>
+      <p class="note" id="cfgnote">These settings apply to the next <b>Run Backtest</b>.
+        Unchanged fields use the strategy's tuned defaults.</p>
+    </div>
+  </div>
+</div>
+<div id="reppanel" hidden>
+  <div class="panel">
+    <div class="panel-h"><span>Comparison report</span>
+      <button id="repbuild">build report</button></div>
+    <div class="panel-b">
+      <div class="cfgfield">
+        <label for="repsymbol">Symbol</label>
+        <input id="repsymbol" type="text" value="ETHUSDT">
+      </div>
+      <div id="repstrats"></div>
+      <p class="note" id="repnote">Tick the strategies to compare; expand one to
+        override its params (unticked fields of expanded strategies use their tuned
+        defaults). Strategies without filter internals (e.g. EMACross) appear in the
+        equity/PnL charts only.</p>
+    </div>
+  </div>
+</div>
 <nav>
   <button class="tab active" data-tab="charts">Charts</button>
   <button class="tab" data-tab="account">Account</button>
+  <button class="tab" data-tab="history">History</button>
 </nav>
 <main>
   <div id="empty" hidden>No results yet — press <b>Run Backtest</b>.</div>
@@ -260,6 +372,26 @@
       </div>
     </div>
   </section>
+
+  <section id="tab-history" hidden>
+    <div class="panel">
+      <div class="panel-h"><span>Run history · Postgres</span>
+        <span class="note"><a href="#" id="histrefresh">refresh</a></span></div>
+      <div class="histscroll">
+        <table id="histtbl">
+          <thead><tr>
+            <th class="num">#</th><th>Generated (UTC)</th><th>Strategy</th>
+            <th class="num">Days</th><th class="num">PnL</th>
+            <th class="num">Return %</th><th class="num">Trades</th>
+            <th class="num">Win %</th><th class="num">Max DD %</th>
+          </tr></thead>
+          <tbody id="histbody"></tbody>
+        </table>
+      </div>
+      <p class="note" style="padding:10px 16px" id="histnote">Click a row to see
+        the full parameter set of that run.</p>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -276,6 +408,8 @@ document.querySelectorAll('nav .tab').forEach(b => b.onclick = () => {
   b.classList.add('active');
   $('tab-charts').hidden = b.dataset.tab !== 'charts';
   $('tab-account').hidden = b.dataset.tab !== 'account';
+  $('tab-history').hidden = b.dataset.tab !== 'history';
+  if (b.dataset.tab === 'history') loadHistory();
 });
 
 /* ---- charts tab ---- */
@@ -697,8 +831,63 @@ async function poll() {
   }
 }
 
+/* ---- run config panel (strategy & params picker) ---- */
+let CFG = null;   // /api/strategies payload
+
+function paramInput(k, v) {
+  if (typeof v === 'boolean')
+    return `<div class="cfgfield chk"><input type="checkbox" id="p_${k}" ${v ? 'checked' : ''}>
+            <label for="p_${k}">${k}</label></div>`;
+  return `<div class="cfgfield"><label for="p_${k}">${k}</label>
+          <input type="number" id="p_${k}" value="${v}" step="any"></div>`;
+}
+
+function renderParams() {
+  if (!CFG) return;
+  const name = $('cfgstrategy').value;
+  const defs = CFG.strategies[name] || {};
+  $('cfgparams').innerHTML = Object.entries(defs)
+    .map(([k, v]) => paramInput(k, v)).join('');
+}
+
+async function loadConfig() {
+  try {
+    CFG = await (await fetch('/api/strategies')).json();
+  } catch (e) { return; }
+  $('cfgstrategy').innerHTML = Object.keys(CFG.strategies)
+    .map(n => `<option value="${n}" ${n === CFG.default ? 'selected' : ''}>${n}</option>`)
+    .join('');
+  $('cfgdays').value = CFG.days;
+  renderParams();
+}
+$('cfgstrategy') && ($('cfgstrategy').onchange = renderParams);
+$('cfgbtn').onclick = () => {
+  const p = $('cfgpanel');
+  p.hidden = !p.hidden;
+  $('cfgbtn').classList.toggle('open', !p.hidden);
+  if (!CFG && !p.hidden) loadConfig();
+};
+$('cfgreset').onclick = e => { e.preventDefault(); loadConfig(); };
+
+function collectRunPayload() {
+  if (!CFG) return {};                      // panel never loaded -> server defaults
+  const name = $('cfgstrategy').value;
+  const defs = CFG.strategies[name] || {};
+  const params = {};
+  for (const [k, d] of Object.entries(defs)) {
+    const el = $('p_' + k);
+    if (!el) continue;
+    params[k] = (typeof d === 'boolean') ? el.checked : Number(el.value);
+  }
+  return {strategy: name, days: Number($('cfgdays').value) || undefined, params};
+}
+
 $('runbtn').onclick = async () => {
-  const r = await fetch('/api/run', {method: 'POST'});
+  const r = await fetch('/api/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(collectRunPayload()),
+  });
   if (r.ok || r.status === 409) {
     $('runbtn').disabled = true;
     if (!pollTimer) pollTimer = setInterval(poll, 2000);
@@ -706,7 +895,178 @@ $('runbtn').onclick = async () => {
   }
 };
 
+/* ---- run history browser ---- */
+async function loadHistory() {
+  const body = $('histbody');
+  try {
+    const r = await fetch('/api/runs?limit=1000');
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    const runs = (await r.json()).runs || [];
+    if (!runs.length) { body.innerHTML =
+      '<tr><td colspan="9" class="note" style="padding:20px">no runs recorded yet</td></tr>'; return; }
+    body.innerHTML = runs.map(run => {
+      const p = run.params || {}, s = run.summary || {};
+      const days = p.window_start && p.window_end
+        ? Math.round((Date.parse(p.window_end) - Date.parse(p.window_start)) / 864e5)
+        : '—';
+      const pnl = s.pnl;
+      return `<tr data-id="${run.id}">
+        <td class="num">${run.id}</td>
+        <td>${(run.generated || '').slice(0, 19).replace('T', ' ')}</td>
+        <td>${p.strategy || '—'}</td>
+        <td class="num">${days}</td>
+        <td class="num ${pnl >= 0 ? 'pos' : 'neg'}">${fmt(pnl)}</td>
+        <td class="num">${s.return_pct == null ? '—' : fmt(s.return_pct, 3)}</td>
+        <td class="num">${s.trades_closed ?? '—'}</td>
+        <td class="num">${s.win_rate_pct == null ? '—' : fmt(s.win_rate_pct, 1)}</td>
+        <td class="num">${s.max_drawdown_pct == null ? '—' : fmt(s.max_drawdown_pct, 2)}</td>
+      </tr>`;
+    }).join('');
+    const byId = Object.fromEntries(runs.map(x => [String(x.id), x]));
+    body.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => {
+      const open = tr.nextElementSibling?.classList.contains('histdetail');
+      body.querySelectorAll('tr.histdetail').forEach(x => x.remove());
+      if (open) return;                     // toggle off
+      const run = byId[tr.dataset.id];
+      const skip = new Set(['strategy', 'window_start', 'window_end']);
+      const chips = Object.entries(run.params || {})
+        .filter(([k]) => !skip.has(k))
+        .map(([k, v]) => `<span class="chip">${k}: ${v}</span>`).join('') +
+        `<span class="chip">window: ${(run.params?.window_start || '').slice(0, 16)} →
+         ${(run.params?.window_end || '').slice(0, 16)}</span>`;
+      tr.insertAdjacentHTML('afterend',
+        `<tr class="histdetail"><td colspan="9">${chips}</td></tr>`);
+    });
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="9" class="note" style="padding:20px">
+      history unavailable: ${e.message || e}</td></tr>`;
+  }
+}
+$('histrefresh').onclick = e => { e.preventDefault(); loadHistory(); };
+
+/* ---- incremental data sync (same routine launch.bat runs) ---- */
+let syncTimer = null;
+async function pollSync() {
+  const st = await (await fetch('/api/sync/status')).json();
+  if (st.state === 'syncing') {
+    $('syncbtn').disabled = true;
+    $('syncstatus').textContent = `syncing ${st.days}d…`;
+  } else {
+    $('syncbtn').disabled = false;
+    clearInterval(syncTimer); syncTimer = null;
+    if (st.state === 'done') {
+      $('syncstatus').textContent = st.new_bars != null
+        ? `synced: +${st.new_bars.toLocaleString('en-US')} bars (${st.symbols_needed}/${st.symbols_total} syms) in ${st.elapsed}s`
+        : `synced in ${st.elapsed}s`;
+    } else if (st.state === 'error') {
+      $('syncstatus').textContent = 'sync failed: ' + (st.error || '?');
+    }
+  }
+}
+$('syncbtn').onclick = async () => {
+  const days = Number($('syncdays').value) || 180;
+  const r = await fetch('/api/sync', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({days}),
+  });
+  if (r.ok || r.status === 409) {
+    $('syncbtn').disabled = true;
+    if (!syncTimer) syncTimer = setInterval(pollSync, 3000);
+    pollSync();
+  }
+};
+
+/* ---- comparison report: pick strategies + params, then build ---- */
+let repTimer = null;
+const REP_DEFAULT_ON = new Set(['KalmanTest', 'ExtendedKalmanTest', 'EMTest']);
+
+function renderRepPanel() {
+  if (!CFG) return;
+  $('repstrats').innerHTML = Object.entries(CFG.strategies).map(([name, defs]) => {
+    const on = REP_DEFAULT_ON.has(name) ? 'checked' : '';
+    const fields = Object.entries(defs).map(([k, v]) => {
+      if (typeof v === 'boolean')
+        return `<div class="cfgfield chk"><input type="checkbox" id="rp_${name}_${k}" ${v ? 'checked' : ''}>
+                <label for="rp_${name}_${k}">${k}</label></div>`;
+      return `<div class="cfgfield"><label for="rp_${name}_${k}">${k}</label>
+              <input type="number" id="rp_${name}_${k}" value="${v}" step="any"></div>`;
+    }).join('');
+    return `<details class="repstrat" data-name="${name}">
+      <summary><input type="checkbox" id="rs_${name}" ${on} onclick="event.stopPropagation()">
+        <b>${name}</b></summary>
+      <div class="repparams">${fields}</div>
+    </details>`;
+  }).join('');
+}
+
+function collectReportPayload() {
+  const strategies = [];
+  document.querySelectorAll('#repstrats details').forEach(det => {
+    const name = det.dataset.name;
+    if (!$('rs_' + name)?.checked) return;
+    const params = {};
+    for (const [k, d] of Object.entries(CFG.strategies[name] || {})) {
+      const el = $(`rp_${name}_${k}`);
+      if (!el) continue;
+      params[k] = (typeof d === 'boolean') ? el.checked : Number(el.value);
+    }
+    strategies.push({name, params});
+  });
+  return {symbol: ($('repsymbol').value || 'ETHUSDT').trim().toUpperCase(),
+          strategies};
+}
+
+function repLink() {
+  $('repstatus').innerHTML = '<a href="/report/" target="_blank">open report ↗</a>';
+}
+async function pollReport() {
+  const st = await (await fetch('/api/report/status')).json();
+  if (st.state === 'building') {
+    $('repbuild').disabled = true;
+    $('repstatus').textContent = 'building report…';
+  } else {
+    $('repbuild').disabled = false;
+    clearInterval(repTimer); repTimer = null;
+    if (st.state === 'error') $('repstatus').textContent = 'report failed: ' + (st.error || '?');
+    else if (st.ready) repLink();
+  }
+}
+$('repbtn').onclick = () => {
+  const p = $('reppanel');
+  p.hidden = !p.hidden;
+  $('repbtn').classList.toggle('open', !p.hidden);
+  const render = () => { if (!$('repstrats').childElementCount) renderRepPanel(); };
+  if (!p.hidden) (CFG ? Promise.resolve() : loadConfig()).then(render);
+};
+$('repbuild').onclick = async () => {
+  const payload = collectReportPayload();
+  if (!payload.strategies.length) {
+    $('repstatus').textContent = 'select at least one strategy'; return;
+  }
+  const r = await fetch('/api/report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  if (r.ok || r.status === 409) {
+    $('repbuild').disabled = true;
+    if (!repTimer) repTimer = setInterval(pollReport, 3000);
+    pollReport();
+  }
+};
+
 loadResults();
+loadConfig();
+fetch('/api/report/status').then(r => r.json())
+  .then(st => { if (st.state === 'building') { $('repbuild').disabled = true;
+                  repTimer = setInterval(pollReport, 3000); }
+                else if (st.ready) repLink(); })
+  .catch(() => {});
+fetch('/api/sync/status').then(r => r.json())
+  .then(st => { if (st.state === 'syncing') { $('syncbtn').disabled = true;
+                  syncTimer = setInterval(pollSync, 3000); } })
+  .catch(() => {});
 poll().then(() => {  // resume polling if a run is already in progress
   if ($('runbtn').disabled && !pollTimer) pollTimer = setInterval(poll, 2000);
 });

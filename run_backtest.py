@@ -22,6 +22,7 @@ from KalmanFilter import KalmanTest
 from ExtendedKalmanFilter import ExtendedKalmanTest
 from AccelerationKalmanFilter import AccelerationKalmanTest
 from EMAlgoTest import EMTest
+from EMAlgoNonLinTest import EMNonLinTest
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, 'datas')
@@ -67,26 +68,65 @@ STRATEGY_PARAMS = dict(
     em_iters=2,        # TUNED: few EM iters (5-10 overfit; 2 generalizes better)
 )
 
-"""STRATEGY_PARAMS = dict(     # ExtendedKalmanTest (ExtendedKalmanFilter.py)
-    trade_usd=2000.0,
-    k=2,
-    a=7,
-    warmup=180,
-    reversion=False,
-    q_level = 0.1e-3,
-    q_vel = 0.1e-6,
-    q_acc = 0.1e-6,
-    k_exit = 0.0,     # TUNED: dead zone OFF (it cut reversions short, ~7x worse)
-    min_hold = 1,     # TUNED: no minimum hold; delaying reversals hurt
-    cost_mult = 0.0,  # TUNED: cost gate off (no measurable benefit)
-    drag_m = 0.001,   # TUNED: drag sweet spot (1e-4 over-damps, off is weaker)
-    c_d_window = 180, # rolling window for the live c_d regime estimate
-    trend_bias = False,# dropped: trend-follow gate fights a mean-reversion entry
-)"""
-"""STRATEGY_PARAMS = dict(     # EMACrossShortTest
-    fast_ema_period =  60,
-    slow_ema_period =  120,
-)"""
+# Registry consumed by the dashboard's strategy picker (GET /api/strategies).
+# name -> (class, tuned defaults). The defaults are what the UI pre-fills and
+# what a run uses for any param the request leaves out.
+STRATEGIES = {
+    'EMTest': (EMTest, dict(STRATEGY_PARAMS)),
+    'KalmanTest': (KalmanTest, dict(
+        trade_usd=2000.0, k=2.0, warmup=180, reversion=False,
+        q_level=0.1e-3, q_vel=0.1e-6)),
+    'ExtendedKalmanTest': (ExtendedKalmanTest, dict(
+        trade_usd=2000.0, k=2.0, a=7.0, warmup=180, reversion=False,
+        q_level=0.1e-3, q_vel=0.1e-6, q_acc=0.1e-6,
+        k_exit=0.0,       # TUNED: dead zone OFF (it cut reversions short, ~7x worse)
+        min_hold=1,       # TUNED: no minimum hold; delaying reversals hurt
+        cost_mult=0.0,    # TUNED: cost gate off (no measurable benefit)
+        drag_m=0.001,     # TUNED: drag sweet spot (1e-4 over-damps, off is weaker)
+        c_d_window=180,
+        trend_bias=False)),  # dropped: trend gate fights a mean-reversion entry
+    'AccelerationKalmanTest': (AccelerationKalmanTest, dict(
+        trade_usd=2000.0, k=2.0, warmup=180, reversion=False,
+        q_level=0.2e-3, q_vel=0.2e-6, q_acc=0.2e-9)),
+    'EMNonLinTest': (EMNonLinTest, dict(
+        trade_usd=2000.0, k=2.5, warmup=180, reversion=False,
+        q_level=0.1e-3, q_vel=0.1e-6, q_acc=0.1e-9, d0=0.0, d_max=1e6,
+        em_window=720, em_interval=1440, em_iters=3)),
+    'EMACrossShortTest': (EMACrossShortTest, dict(
+        trade_usd=2000.0, fast_ema_period=60, slow_ema_period=120)),
+}
+
+
+def _resolve_run_config(strategy=None, params=None, days=None):
+    """(cls, effective_params, days) for a run. Unknown strategy names fall
+    back to the module default; param values are coerced to the default's type
+    and unknown keys dropped (passing a foreign param straight into backtrader
+    raises 'unexpected keyword argument' deep in strategy __init__)."""
+    if strategy and strategy in STRATEGIES:
+        cls, eff = STRATEGIES[strategy][0], dict(STRATEGIES[strategy][1])
+    else:
+        cls, eff = STRATEGY, dict(STRATEGY_PARAMS)
+    for k, v in (params or {}).items():
+        if k not in eff:
+            print('[backtest] ignoring unknown param %r for %s' % (k, cls.__name__))
+            continue
+        d = eff[k]
+        try:
+            if isinstance(d, bool):
+                v = v if isinstance(v, bool) else str(v).lower() in ('1', 'true', 'yes', 'on')
+            elif isinstance(d, int):
+                v = int(float(v))
+            elif isinstance(d, float):
+                v = float(v)
+        except (TypeError, ValueError):
+            print('[backtest] bad value %r for param %r — keeping default %r' % (v, k, d))
+            continue
+        eff[k] = v
+    try:
+        days = int(days) if days else BACKTEST_DAYS
+    except (TypeError, ValueError):
+        days = BACKTEST_DAYS
+    return cls, eff, max(1, days)
 
 BACKTEST_DAYS = 7
 BACKTEST_END = None   # 'YYYY-MM-DD HH:MM' (UTC), or None = latest available bar
@@ -99,7 +139,7 @@ def _status(**kw):
         json.dump(kw, f)
 
 
-def _prepare_csvs_from_db():
+def _prepare_csvs_from_db(days=None):
     try:
         import db
         conn = db.get_conn()
@@ -117,7 +157,7 @@ def _prepare_csvs_from_db():
             end = datetime.strptime(BACKTEST_END, '%Y-%m-%d %H:%M')
         else:
             end = avail_last
-        start = end - timedelta(days=BACKTEST_DAYS)
+        start = end - timedelta(days=days or BACKTEST_DAYS)
 
         tol = timedelta(hours=1)
         if start < avail_first - tol or end > avail_last + tol:
@@ -172,7 +212,7 @@ def _csv_span(path):
     return datetime.strptime(first, fmt), datetime.strptime(last, fmt)
 
 
-def _resolve_window():
+def _resolve_window(days=None):
     """Backtest [start, end] from config + what the CSVs actually cover.
 
     Returns (start, end) or raises ValueError with the abort message when the
@@ -193,7 +233,7 @@ def _resolve_window():
         end = datetime.strptime(BACKTEST_END, '%Y-%m-%d %H:%M')
     else:
         end = avail_last
-    start = end - timedelta(days=BACKTEST_DAYS)
+    start = end - timedelta(days=days or BACKTEST_DAYS)
 
     tol = timedelta(hours=1)   # first/last bars may sit just inside the edge
     if start < avail_first - tol or end > avail_last + tol:
@@ -389,9 +429,9 @@ def _dump_position_logs(strat, out_dir):
     return len(strat.trade_log)
 
 
-def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols):
+def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols, days=None):
     import csv as _csv
-    rows = [('strategy', STRATEGY.__name__)]
+    rows = [('strategy', type(strat).__name__)]
     eff = {k: getattr(strat.params, k) for k in strat.params._getkeys()}
     for k, v in eff.items():
         rows.append(('param.%s' % k, v))
@@ -403,7 +443,7 @@ def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols):
         ('risk_free_annual', RISK_FREE_ANNUAL),
         ('window_start', bt_start.isoformat()),
         ('window_end', bt_end.isoformat()),
-        ('backtest_days', BACKTEST_DAYS),
+        ('backtest_days', days or BACKTEST_DAYS),
         ('symbols', n_symbols),
     ]
     """with open(os.path.join(out_dir, 'config.csv'), 'w',
@@ -539,11 +579,13 @@ def _dget(node, *keys, default=0):
     return cur if cur or cur == 0 else default
 
 
-def run():
+def run(strategy=None, params=None, days=None):
     started = time.time()
+    cls, eff_params, days = _resolve_run_config(strategy, params, days)
 
     try:
-        _status(state='running', phase='loading')
+        _status(state='running', phase='loading',
+                strategy=cls.__name__, days=days)
         os.makedirs(REPORTS, exist_ok=True)
         shutil.rmtree(CHARTDATA_DIR, ignore_errors=True)
         for stale in ('trades.csv', 'positions.csv'):
@@ -553,9 +595,9 @@ def run():
                 pass
 
         try:
-            window = _prepare_csvs_from_db()
+            window = _prepare_csvs_from_db(days)
             if window is None:
-                window = _resolve_window()
+                window = _resolve_window(days)
             bt_start, bt_end = window
         except ValueError as e:
             print('[backtest] %s' % e)
@@ -575,7 +617,7 @@ def run():
         print('[backtest] %d feeds loaded' % len(symbols))
 
 #--------------------------------------------------------------------------------------
-        cerebro.addstrategy(STRATEGY, **STRATEGY_PARAMS)
+        cerebro.addstrategy(cls, **eff_params)
 #---------------------------------------------------------------------------------------
 
 
@@ -678,8 +720,8 @@ def run():
 
         results = {
             'generated': datetime.now(timezone.utc).isoformat(),
-            'params': dict(STRATEGY_PARAMS,
-                           strategy=STRATEGY.__name__,
+            'params': dict(eff_params,
+                           strategy=cls.__name__,
                            leverage=LEVERAGE,
                            window_start=bt_start.isoformat(),
                            window_end=bt_end.isoformat()),

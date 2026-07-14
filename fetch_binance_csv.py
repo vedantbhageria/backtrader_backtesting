@@ -275,11 +275,16 @@ def _download(symbol, ranges, now_ms):
     return rows
 
 
-def main():
+def main(days=180):
+    """Incremental sync of the last `days` days into postgres: asks the DB
+    what's already stored, downloads only the missing ranges, upserts (the
+    same logic launch.bat runs; the dashboard's Sync button calls this with
+    a user-chosen day count). Returns a small stats dict."""
+    days = max(1, int(days))
     started = time.time()
     now = datetime.now(timezone.utc)
     end_ms = int(now.timestamp() * 1000)
-    start_ms = end_ms - 180 * 86_400_000
+    start_ms = end_ms - days * 86_400_000
     start_dt, end_dt = _ms_to_dt(start_ms), _ms_to_dt(end_ms)
 
     conn = None
@@ -304,7 +309,8 @@ def main():
             for fut in as_completed(futures):
                 fut.result()
         print("Done (no DB) in %.1fs" % (time.time() - started))
-        return
+        return {'db': False, 'days': days,
+                'elapsed': round(time.time() - started, 1)}
 
     # 1) Ask the database what's already there; compute only the gaps.
     need = {}
@@ -340,6 +346,9 @@ def main():
     # from postgres right before each run.
     print("Inserted/updated %d bars in postgres in %.1fs"
           % (new_bars, time.time() - started))
+    return {'db': True, 'days': days, 'symbols_needed': len(need),
+            'symbols_total': len(SYMBOLS), 'new_bars': new_bars,
+            'elapsed': round(time.time() - started, 1)}
 
 
 if __name__ == "__main__":

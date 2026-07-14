@@ -15,28 +15,21 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 
-from KalmanFilter import KalmanTest
-from ExtendedKalmanFilter import ExtendedKalmanTest
-from EMAlgoTest import EMTest
-
 DATA_DIR = 'datas'
 OUT_DIR = 'report_out'
 SYMBOL_PREF = 'ETHUSDT'
 START_CASH, COMMISSION, LEVERAGE = 100_000.0, 0.0002, 10.0
 DS = 7000    # downsample the series to ~this many points (SVG Scatter)
 
-# label, class, params, colour
-STRATS = [
-    ('Kalman', KalmanTest,
-     dict(k=2, warmup=180, q_level=0.1e-3, q_vel=0.1e-6), '#4c9be8'),
-    ('Extended Kalman', ExtendedKalmanTest,
-     dict(k=2, warmup=180, q_level=0.1e-3, q_vel=0.1e-6,
-          k_exit=0.0, min_hold=1, cost_mult=0.0, drag_m=0.001,
-          trend_bias=False, c_d_window=180), '#e8834c'),
-    ('EM-Kalman', EMTest,
-     dict(k=2.5, warmup=180, q_level=0.1e-3, q_vel=0.1e-6,
-          em_window=720, em_interval=2880, em_iters=2), '#5cc98a'),
+# Strategy classes + tuned defaults come from run_backtest.STRATEGIES (the
+# same registry the dashboard's run picker uses), so the report accepts ANY
+# registered strategy with per-strategy param overrides.
+DEFAULT_SELECTION = [
+    {'name': 'KalmanTest'},
+    {'name': 'ExtendedKalmanTest'},
+    {'name': 'EMTest'},
 ]
+PALETTE = ['#4c9be8', '#e8834c', '#5cc98a', '#b58cf0', '#e5566a', '#4fc6c0']
 
 LABELS = {'P00': 'Var(position)', 'P11': 'Var(velocity)', 'P22': 'Var(accel)',
           'P01': 'Cov(pos, vel)', 'P02': 'Cov(pos, accel)', 'P12': 'Cov(vel, accel)'}
@@ -61,18 +54,25 @@ def run_strategy(label, Strat, params, path, sym, color):
     cer.addstrategy(Strat, **dict(params, diag=True))
     strat = cer.run()[0]
     end = cer.broker.getvalue()
-    diag = pd.DataFrame(strat._diag[sym])
-    diag['dt'] = pd.to_datetime(diag['t'], unit='s', utc=True)
-    diag = diag.set_index('dt')
+    rows = strat._diag.get(sym, [])
+    if rows:                       # strategies without filter internals (e.g.
+        diag = pd.DataFrame(rows)  # EMACross) still get equity/PnL panels
+        diag['dt'] = pd.to_datetime(diag['t'], unit='s', utc=True)
+        diag = diag.set_index('dt')
+    else:
+        diag = None
     eq = pd.DataFrame(strat.equity, columns=['dt', 'value'])
     eq['dt'] = pd.to_datetime(eq['dt']); eq = eq.set_index('dt')
     tl = strat.trade_log
     wins = sum(1 for t in tl if t['pnlcomm'] > 0)
-    innov = diag['innov'].to_numpy(float)
+    rms = None
+    if diag is not None:
+        innov = diag['innov'].to_numpy(float)
+        rms = round(float(np.sqrt(np.mean(innov ** 2))), 4)
     stats = dict(end_value=round(end, 2), pnl=round(end - START_CASH, 2),
                  trades=len(tl), wins=wins,
                  win_rate=round(100.0 * wins / len(tl), 2) if tl else 0.0,
-                 innov_rms=round(float(np.sqrt(np.mean(innov ** 2))), 4))
+                 innov_rms=rms)
     return dict(name=label, diag=diag, equity=eq, stats=stats, color=color)
 
 
@@ -195,7 +195,9 @@ def summary_table(results):
     for res in results:
         s = res['stats']
         body += '<tr><th class="rowh">%s</th>%s</tr>' % (
-            res['name'], ''.join('<td>%s</td>' % s[c] for c in cols))
+            res['name'],
+            ''.join('<td>%s</td>' % ('&mdash;' if s[c] is None else s[c])
+                    for c in cols))
     return '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>' % (head, body)
 
 
@@ -205,42 +207,76 @@ def div(fig, first=False):
                        config={'displayModeBar': True, 'responsive': True, 'scrollZoom': True})
 
 
-def build(symbol=SYMBOL_PREF):
+def build(symbol=SYMBOL_PREF, selections=None):
+    """selections: [{'name': <registry name>, 'params': {...overrides}}, ...]
+    (None -> DEFAULT_SELECTION). Classes and tuned defaults resolve through
+    run_backtest.STRATEGIES; unknown params are dropped / type-coerced by the
+    same _resolve_run_config the run API uses."""
+    import run_backtest
     sym, path = pick_symbol(symbol)
     print('[report] symbol:', sym)
     results = []
-    for label, Strat, params, color in STRATS:
-        print('[report] running %s ...' % label)
-        results.append(run_strategy(label, Strat, params, path, sym, color))
+    for i, sel in enumerate(selections or DEFAULT_SELECTION):
+        name = sel.get('name')
+        if name not in run_backtest.STRATEGIES:
+            print('[report] skipping unknown strategy %r' % name)
+            continue
+        cls, params, _days = run_backtest._resolve_run_config(
+            name, sel.get('params'), None)
+        color = PALETTE[i % len(PALETTE)]
+        print('[report] running %s ...' % name)
+        res = run_strategy(name, cls, params, path, sym, color)
+        res['params'] = params
+        results.append(res)
+    if not results:
+        raise ValueError('no valid strategies selected')
     print('[report] building interactive figures ...')
 
-    span = '%s → %s' % (results[0]['diag'].index[0].strftime('%Y-%m-%d'),
-                        results[0]['diag'].index[-1].strftime('%Y-%m-%d'))
+    with_diag = [r for r in results if r['diag'] is not None]
+    ref = with_diag[0]['diag'] if with_diag else results[0]['equity']
+    span = '%s → %s' % (ref.index[0].strftime('%Y-%m-%d'),
+                             ref.index[-1].strftime('%Y-%m-%d'))
+
+    # which params each strategy ran with, so a shared report is self-describing
+    cfg_lines = ''.join(
+        '<p class="note"><b>%s</b> · %s</p>' % (
+            r['name'],
+            ', '.join('%s=%s' % (k, v) for k, v in sorted(r.get('params', {}).items())))
+        for r in results)
+
     parts = [
         summary_table(results),
+        cfg_lines,
         '<p class="note">Interactive: <b>hover</b> for values, <b>drag</b> to zoom, '
         'double-click to reset. Series are downsampled to ~%d points for the browser.</p>' % DS,
         '<h2>Win rate &amp; PnL</h2>' + div(fig_winpnl(results), first=True),
         '<h2>Equity curve</h2>' + div(fig_equity(results)),
-        '<h2>Prediction &amp; confidence bands</h2>'
-        '<p class="note">Price &amp; prediction overlap at full zoom (the filter tracks price) — '
-        'drag-select a small region to see the prediction line and ±kσ band separate.</p>'
-        + div(fig_pred(results)),
-        '<h2>Innovation &amp; its uncertainty</h2>'
-        '<p class="note"><b>RMS</b> = √mean(innov²), the typical prediction error (price units). '
-        'Lower panel is √S, the std-dev the filter expects each bar.</p>'
-        + div(fig_innov(results)),
-        '<h2>Covariance matrix P</h2>'
-        '<p class="note">Default view is the post-warmup <b>steady state</b> (P converges to a '
-        'fixed covariance via the Riccati recursion; EM-Kalman\'s jumps when it refits Q, R). '
-        'Hover reads the exact value; autoscale (modebar) to see the initial transient. '
-        'Diagonal = variances (≥0); off-diagonal covariances may be negative.</p>',
     ]
-    for res in results:
-        parts.append('<h3>%s</h3>' % res['name'] + div(fig_P(res)))
+    if with_diag:
+        parts += [
+            '<h2>Prediction &amp; confidence bands</h2>'
+            '<p class="note">Price &amp; prediction overlap at full zoom (the filter tracks '
+            'price) — drag-select a small region to see the prediction line and '
+            '±kσ band separate.</p>'
+            + div(fig_pred(with_diag)),
+            '<h2>Innovation &amp; its uncertainty</h2>'
+            '<p class="note"><b>RMS</b> = √mean(innov²), the typical prediction '
+            'error (price units). Lower panel is √S, the std-dev the filter expects '
+            'each bar.</p>'
+            + div(fig_innov(with_diag)),
+            '<h2>Covariance matrix P</h2>'
+            '<p class="note">Default view is the post-warmup <b>steady state</b> (P converges '
+            'to a fixed covariance via the Riccati recursion; EM variants jump when they '
+            'refit Q, R). Hover reads the exact value; autoscale (modebar) to see the '
+            'initial transient. Diagonal = variances (≥0); off-diagonal covariances '
+            'may be negative.</p>',
+        ]
+        for res in with_diag:
+            parts.append('<h3>%s</h3>' % res['name'] + div(fig_P(res)))
 
-    html = TEMPLATE.format(symbol=sym, span=span, bars=len(results[0]['diag']),
-                           body='\n'.join(parts))
+    names = ' vs '.join(r['name'] for r in results)
+    html = TEMPLATE.format(symbol=sym, span=span, names=names,
+                           bars=len(ref), body='\n'.join(parts))
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, 'index.html')
     with open(out, 'w', encoding='utf-8') as f:
@@ -251,7 +287,7 @@ def build(symbol=SYMBOL_PREF):
 TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KF vs EKF vs EM · {symbol}</title>
+<title>{names} · {symbol}</title>
 <style>
   :root {{ --bg:#0f1420; --ink:#e7edf5; --muted:#8a97ad; --line:#243048; --accent:#37c1d1; }}
   * {{ box-sizing:border-box; }}
@@ -273,7 +309,7 @@ TEMPLATE = """<!doctype html>
 </style></head>
 <body><div class="wrap">
 <header>
-  <h1>Kalman vs Extended Kalman vs EM-Kalman</h1>
+  <h1>{names}</h1>
   <p>symbol {symbol} · {bars} bars · {span}</p>
 </header>
 {body}

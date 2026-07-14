@@ -4,7 +4,6 @@ from __future__ import (absolute_import, division, print_function,
 import os.path
 import sys
 from collections import deque
-
 import backtrader as bt
 import numpy as np
 
@@ -13,253 +12,128 @@ from strategy_base import PortfolioStrategy
 _F = np.array([[1.0, 1.0], [0.0, 1.0]])   # position += velocity
 _H = np.array([[1.0, 0.0]])               # measure position only
 
+_LOG2PI = float(np.log(2.0 * np.pi))
 
-def _kalman_step(x, P, z, F, H, Q, R):
-    """One predict+update step. Returns (x_new, P_new, x_pred, P_pred, innov, S, K)."""
-    x_pred = F @ x
-    P_pred = F @ P @ F.T + Q
-    S = H @ P_pred @ H.T + R
-    K = P_pred @ H.T @ np.linalg.inv(S)
-    innov = z - H @ x_pred
-    x_new = x_pred + K @ innov
-    n = x.shape[0]
-    P_new = (np.eye(n) - K @ H) @ P_pred
-    P_new = 0.5 * (P_new + P_new.T)
-    return x_new, P_new, x_pred, P_pred, innov, S, K
+try:
+    from numba import njit
+    _NUMBA = True
+except ImportError:                     # graceful fallback: no-op decorator
+    _NUMBA = False
+
+    def njit(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        return lambda f: f
 
 
-def _kalman_forward(Z, x0, P0, F, H, Q, R):
+@njit(cache=True)
+def _inv2(A):
+    """Explicit 2x2 inverse (np.linalg.inv goes through LAPACK -- pure
+    overhead at this size)."""
+    det = A[0, 0]*A[1, 1] - A[0, 1]*A[1, 0]
+    out = np.empty((2, 2))
+    out[0, 0] = A[1, 1]/det; out[0, 1] = -A[0, 1]/det
+    out[1, 0] = -A[1, 0]/det; out[1, 1] = A[0, 0]/det
+    return out
 
-    T = len(Z)
-    n = x0.shape[0]
-    X_f = np.zeros((T, n, 1)); P_f = np.zeros((T, n, n))
-    X_p = np.zeros((T, n, 1)); P_p = np.zeros((T, n, n))
-    x, P = x0, P0
+
+@njit(cache=True)
+def _cv_forward(Z, x0, P0, F, Q, r):
+    """Kalman forward pass, H = [1, 0] (measure the level), scalar R = r.
+    Same recursion as _kalman_forward below."""
+    T = Z.shape[0]
+    X_f = np.empty((T, 2, 1)); P_f = np.empty((T, 2, 2))
+    X_p = np.empty((T, 2, 1)); P_p = np.empty((T, 2, 2))
+    x, P = x0.copy(), P0.copy()
+    K = np.zeros((2, 1))
     loglik = 0.0
-    K_last = None
     for t in range(T):
-        x, P, x_pred, P_pred, innov, S, K = _kalman_step(x, P, Z[t], F, H, Q, R)
-        X_p[t], P_p[t] = x_pred, P_pred
-        X_f[t], P_f[t] = x, P
-        K_last = K
-        sign, logdet = np.linalg.slogdet(S)
-        loglik += -0.5 * (logdet + (innov.T @ np.linalg.inv(S) @ innov).item()
-                          + H.shape[0] * np.log(2 * np.pi))
-    return X_f, P_f, X_p, P_p, K_last, loglik
+        x_pred = F @ x
+        P_pred = F @ P @ F.T + Q
+        S = P_pred[0, 0] + r                 # H P_pred H^T + R, H = [1,0]
+        innov = Z[t] - x_pred[0, 0]
+        K = P_pred[:, :1] / S                # P_pred H^T S^-1
+        x = x_pred + K * innov
+        P = P_pred - K * P_pred[0, :]        # (I - K H) P_pred  (K (2,1) x row (2,) broadcasts to the 2x2 outer product K H P_pred)
+        P = 0.5 * (P + P.T)
+        X_p[t] = x_pred; P_p[t] = P_pred
+        X_f[t] = x; P_f[t] = P
+        loglik += -0.5 * (np.log(S) + innov*innov/S + _LOG2PI)
+    return X_f, P_f, X_p, P_p, K, loglik
 
 
-def _rts_smoother(X_f, P_f, X_p, P_p, F):
-    """Returns smoothed means/covariances
-    and the smoothing gain J_t (needed for the lag-one covariance below)."""
-    T, n, _ = X_f.shape
-    X_s = np.zeros_like(X_f); P_s = np.zeros_like(P_f)
-    J = np.zeros((T, n, n))
-    X_s[-1], P_s[-1] = X_f[-1], P_f[-1]
+@njit(cache=True)
+def _cv_smoother(X_f, P_f, X_p, P_p, F):
+    """RTS backward pass -- same recursion as _rts_smoother below."""
+    T = X_f.shape[0]
+    X_s = X_f.copy(); P_s = P_f.copy()
+    J = np.zeros((T, 2, 2))
     for t in range(T - 2, -1, -1):
-        J[t] = P_f[t] @ F.T @ np.linalg.inv(P_p[t + 1])
+        J[t] = P_f[t] @ F.T @ _inv2(P_p[t + 1])
         X_s[t] = X_f[t] + J[t] @ (X_s[t + 1] - X_p[t + 1])
-        P_s[t] = P_f[t] + J[t] @ (P_s[t + 1] - P_p[t + 1]) @ J[t].T
-        P_s[t] = 0.5 * (P_s[t] + P_s[t].T)
+        Pt = P_f[t] + J[t] @ (P_s[t + 1] - P_p[t + 1]) @ J[t].T
+        P_s[t] = 0.5 * (Pt + Pt.T)
     return X_s, P_s, J
 
 
-def _lag_one_covariance(P_f, J, K_last, F, H, P0, P_p0):
+@njit(cache=True)
+def _cv_lag(P_f, J, K_last, F, P0, P_p0):
 
-    T, n, _ = P_f.shape
-    I = np.eye(n)
-    P_lag = np.zeros((T, n, n))
-    J_prior = P0 @ F.T @ np.linalg.inv(P_p0)
-
+    T = P_f.shape[0]
+    P_lag = np.zeros((T, 2, 2))
+    J_prior = P0 @ F.T @ _inv2(P_p0)
+    IKH = np.eye(2)
+    IKH[:, 0] -= K_last[:, 0]                # I - K H, H = [1,0]
     if T >= 2:
-        P_lag[T - 1] = (I - K_last @ H) @ F @ P_f[T - 2]
+        P_lag[T - 1] = IKH @ F @ P_f[T - 2]
         for t in range(T - 2, 0, -1):
             P_lag[t] = P_f[t] @ J[t - 1].T + J[t] @ (P_lag[t + 1] - F @ P_f[t]) @ J[t - 1].T
         P_lag[0] = P_f[0] @ J_prior.T + J[0] @ (P_lag[1] - F @ P_f[0]) @ J_prior.T
     else:
-        P_lag[0] = (I - K_last @ H) @ F @ P0
-    return P_lag
-
-
-_LOG2PI = float(np.log(2.0 * np.pi))
+        P_lag[0] = IKH @ F @ P0
+    return P_lag, J_prior
 
 
 def _em_fit_cv(prices, x0, P0, Q0, R0, n_iter, r_floor):
-    """Fused scalar fast path of em_fit for THIS module's fixed model
-    (F=[[1,1],[0,1]], H=[1,0], scalar R). Same math as the general numpy
-    path below, hand-expanded to plain float arithmetic -- the per-step numpy
-    call overhead dominated the runtime (~56us/step -> ~2us/step). Validated
-    against the general path to ~1e-9 on real and synthetic data."""
-    Z = [float(p) for p in prices]
+
+    Z = np.ascontiguousarray(prices, dtype=float)
     T = len(Z)
-    x0_0, x0_1 = float(x0[0, 0]), float(x0[1, 0])
-    P0_00, P0_01, P0_11 = float(P0[0, 0]), float(P0[0, 1]), float(P0[1, 1])
-    q00, q01, q11 = float(Q0[0, 0]), float(Q0[0, 1]), float(Q0[1, 1])
+    F = _F
+    x0 = np.ascontiguousarray(x0, dtype=float)
+    P0 = np.ascontiguousarray(P0, dtype=float)
+    Q = np.ascontiguousarray(Q0, dtype=float)
     r = float(R0[0, 0])
     loglik_hist = []
 
-    from math import log as _log
-
-    def forward(q00, q01, q11, r):
-        """One filter pass. Returns per-t lists + last gain + loglik."""
-        xp0 = [0.0]*T; xp1 = [0.0]*T
-        pp00 = [0.0]*T; pp01 = [0.0]*T; pp11 = [0.0]*T
-        xf0 = [0.0]*T; xf1 = [0.0]*T
-        pf00 = [0.0]*T; pf01 = [0.0]*T; pf11 = [0.0]*T
-        a0, a1 = x0_0, x0_1
-        c00, c01, c11 = P0_00, P0_01, P0_11
-        ll = 0.0
-        K0 = K1 = 0.0
-        for t in range(T):
-            # predict
-            p0 = a0 + a1
-            b00 = c00 + 2.0*c01 + c11 + q00
-            b01 = c01 + c11 + q01
-            b11 = c11 + q11
-            S = b00 + r
-            K0 = b00 / S; K1 = b01 / S
-            innov = Z[t] - p0
-            xp0[t] = p0; xp1[t] = a1               # a-priori x1 == previous a1
-            # update
-            a0 = p0 + K0*innov
-            a1 = a1 + K1*innov
-            omk = 1.0 - K0
-            n00 = omk*b00
-            n11 = b11 - K1*b01
-            n01 = 0.5*(omk*b01 + (b01 - K1*b00))   # symmetrized, as numpy path
-            pp00[t] = b00; pp01[t] = b01; pp11[t] = b11
-            xf0[t] = a0; xf1[t] = a1
-            pf00[t] = n00; pf01[t] = n01; pf11[t] = n11
-            c00, c01, c11 = n00, n01, n11
-            ll += -0.5*(_log(S) + innov*innov/S + _LOG2PI)
-        return (xp0, xp1, pp00, pp01, pp11, xf0, xf1,
-                pf00, pf01, pf11, K0, K1, ll)
-
     for _ in range(n_iter):
-        (xp0, xp1, pp00, pp01, pp11, xf0, xf1,
-         pf00, pf01, pf11, KL0, KL1, ll) = forward(q00, q01, q11, r)
+        X_f, P_f, X_p, P_p, K_last, ll = _cv_forward(Z, x0, P0, F, Q, r)
         loglik_hist.append(ll)
+        X_s, P_s, J = _cv_smoother(X_f, P_f, X_p, P_p, F)
+        P_lag, J_prior = _cv_lag(P_f, J, K_last, F, P0, P_p[0])
 
-        # ---- RTS smoother (backward) + store J per t --------------------
-        xs0 = [0.0]*T; xs1 = [0.0]*T
-        ps00 = [0.0]*T; ps01 = [0.0]*T; ps11 = [0.0]*T
-        J00 = [0.0]*T; J01 = [0.0]*T; J10 = [0.0]*T; J11 = [0.0]*T
-        xs0[T-1], xs1[T-1] = xf0[T-1], xf1[T-1]
-        ps00[T-1], ps01[T-1], ps11[T-1] = pf00[T-1], pf01[T-1], pf11[T-1]
-        for t in range(T-2, -1, -1):
-            a, b, c = pp00[t+1], pp01[t+1], pp11[t+1]
-            det = a*c - b*b
-            i00 = c/det; i01 = -b/det; i11 = a/det
-            m00 = pf00[t] + pf01[t]; m01 = pf01[t]
-            m10 = pf01[t] + pf11[t]; m11 = pf11[t]
-            j00 = m00*i00 + m01*i01; j01 = m00*i01 + m01*i11
-            j10 = m10*i00 + m11*i01; j11 = m10*i01 + m11*i11
-            J00[t] = j00; J01[t] = j01; J10[t] = j10; J11[t] = j11
-            dx0 = xs0[t+1] - xp0[t+1]; dx1 = xs1[t+1] - xp1[t+1]
-            xs0[t] = xf0[t] + j00*dx0 + j01*dx1
-            xs1[t] = xf1[t] + j10*dx0 + j11*dx1
-            d00 = ps00[t+1] - pp00[t+1]
-            d01 = ps01[t+1] - pp01[t+1]
-            d11 = ps11[t+1] - pp11[t+1]
-            g00 = j00*d00 + j01*d01; g01 = j00*d01 + j01*d11
-            g10 = j10*d00 + j11*d01; g11 = j10*d01 + j11*d11
-            e00 = g00*j00 + g01*j01
-            e01 = g00*j10 + g01*j11
-            e10 = g10*j00 + g11*j01
-            e11 = g10*j10 + g11*j11
-            ps00[t] = pf00[t] + e00
-            ps11[t] = pf11[t] + e11
-            ps01[t] = pf01[t] + 0.5*(e01 + e10)
+        # prior's smoothed posterior (see the note in the general path)
+        x0_s = x0 + J_prior @ (X_s[0] - X_p[0])
+        P0_s = P0 + J_prior @ (P_s[0] - P_p[0]) @ J_prior.T
+        P0_s = 0.5 * (P0_s + P0_s.T)
 
-        # ---- prior's smoothed posterior + J_prior -----------------------
-        a, b, c = pp00[0], pp01[0], pp11[0]
-        det = a*c - b*b
-        i00 = c/det; i01 = -b/det; i11 = a/det
-        m00 = P0_00 + P0_01; m01 = P0_01
-        m10 = P0_01 + P0_11; m11 = P0_11
-        jp00 = m00*i00 + m01*i01; jp01 = m00*i01 + m01*i11
-        jp10 = m10*i00 + m11*i01; jp11 = m10*i01 + m11*i11
-        dx0 = xs0[0] - xp0[0]; dx1 = xs1[0] - xp1[0]
-        x0s0 = x0_0 + jp00*dx0 + jp01*dx1
-        x0s1 = x0_1 + jp10*dx0 + jp11*dx1
-        d00 = ps00[0] - pp00[0]; d01 = ps01[0] - pp01[0]; d11 = ps11[0] - pp11[0]
-        g00 = jp00*d00 + jp01*d01; g01 = jp00*d01 + jp01*d11
-        g10 = jp10*d00 + jp11*d01; g11 = jp10*d01 + jp11*d11
-        p0s00 = P0_00 + (g00*jp00 + g01*jp01)
-        p0s11 = P0_11 + (g10*jp10 + g11*jp11)
-        p0s01 = P0_01 + 0.5*((g00*jp10 + g01*jp11) + (g10*jp00 + g11*jp01))
+        # M-step sufficient statistics, vectorised over t
+        X_prev = np.concatenate((x0_s[None], X_s[:-1]))
+        P_prev = np.concatenate((P0_s[None], P_s[:-1]))
+        S11 = P_s.sum(0) + np.einsum('tia,tja->ij', X_s, X_s)
+        S10 = P_lag.sum(0) + np.einsum('tia,tja->ij', X_s, X_prev)
+        S00 = P_prev.sum(0) + np.einsum('tia,tja->ij', X_prev, X_prev)
 
-        # ---- lag-one covariance (backward, exact recursion) -------------
-        lag00 = [0.0]*T; lag01 = [0.0]*T; lag10 = [0.0]*T; lag11 = [0.0]*T
-        if T >= 2:
-            f00 = pf00[T-2] + pf01[T-2]; f01 = pf01[T-2] + pf11[T-2]
-            f10 = pf01[T-2]; f11 = pf11[T-2]
-            omk = 1.0 - KL0
-            lag00[T-1] = omk*f00
-            lag01[T-1] = omk*f01
-            lag10[T-1] = -KL1*f00 + f10
-            lag11[T-1] = -KL1*f01 + f11
-            for t in range(T-2, -1, -1):
-                # F @ P_f[t]
-                f00 = pf00[t] + pf01[t]; f01 = pf01[t] + pf11[t]
-                f10 = pf01[t]; f11 = pf11[t]
-                g00 = lag00[t+1] - f00; g01 = lag01[t+1] - f01
-                g10 = lag10[t+1] - f10; g11 = lag11[t+1] - f11
-                a00 = J00[t]*g00 + J01[t]*g10; a01 = J00[t]*g01 + J01[t]*g11
-                a10 = J10[t]*g00 + J11[t]*g10; a11 = J10[t]*g01 + J11[t]*g11
-                if t >= 1:
-                    k00, k01, k10, k11 = J00[t-1], J01[t-1], J10[t-1], J11[t-1]
-                else:
-                    k00, k01, k10, k11 = jp00, jp01, jp10, jp11
-                # P_f[t] @ K^T  (P_f symmetric)
-                b00 = pf00[t]*k00 + pf01[t]*k01; b01 = pf00[t]*k10 + pf01[t]*k11
-                b10 = pf01[t]*k00 + pf11[t]*k01; b11 = pf01[t]*k10 + pf11[t]*k11
-                lag00[t] = b00 + a00*k00 + a01*k01
-                lag01[t] = b01 + a00*k10 + a01*k11
-                lag10[t] = b10 + a10*k00 + a11*k01
-                lag11[t] = b11 + a10*k10 + a11*k11
-        else:
-            omk = 1.0 - KL0
-            f00 = P0_00 + P0_01; f01 = P0_01 + P0_11
-            lag00[0] = omk*f00; lag01[0] = omk*f01
-            lag10[0] = -KL1*f00 + P0_01; lag11[0] = -KL1*f01 + P0_11
+        Q = (S11 - F @ S10.T - S10 @ F.T + F @ S00 @ F.T) / T
+        Q = 0.5 * (Q + Q.T)
+        w, v = np.linalg.eigh(Q)
+        Q = np.ascontiguousarray((v * np.clip(w, r_floor, None)) @ v.T)
 
-        # ---- M-step sums (vectorized) ------------------------------------
-        za = np.asarray(Z)
-        Xs0 = np.asarray(xs0); Xs1 = np.asarray(xs1)
-        prev0 = np.empty(T); prev0[0] = x0s0; prev0[1:] = Xs0[:-1]
-        prev1 = np.empty(T); prev1[0] = x0s1; prev1[1:] = Xs1[:-1]
-        Ps00 = np.asarray(ps00); Ps01 = np.asarray(ps01); Ps11 = np.asarray(ps11)
-        pv00 = np.empty(T); pv00[0] = p0s00; pv00[1:] = Ps00[:-1]
-        pv01 = np.empty(T); pv01[0] = p0s01; pv01[1:] = Ps01[:-1]
-        pv11 = np.empty(T); pv11[0] = p0s11; pv11[1:] = Ps11[:-1]
+        innov = Z - X_s[:, 0, 0]                       # z_t - H x_s
+        r = max(float((innov @ innov + P_s[:, 0, 0].sum()) / T), r_floor)
 
-        S11 = np.array([[Ps00.sum() + (Xs0*Xs0).sum(), Ps01.sum() + (Xs0*Xs1).sum()],
-                        [0.0,                          Ps11.sum() + (Xs1*Xs1).sum()]])
-        S11[1, 0] = S11[0, 1]
-        S10 = np.array([[np.sum(lag00) + (Xs0*prev0).sum(), np.sum(lag01) + (Xs0*prev1).sum()],
-                        [np.sum(lag10) + (Xs1*prev0).sum(), np.sum(lag11) + (Xs1*prev1).sum()]])
-        S00 = np.array([[pv00.sum() + (prev0*prev0).sum(), pv01.sum() + (prev0*prev1).sum()],
-                        [0.0,                              pv11.sum() + (prev1*prev1).sum()]])
-        S00[1, 0] = S00[0, 1]
-
-        F = _F
-        Q_new = (S11 - F @ S10.T - S10 @ F.T + F @ S00 @ F.T) / T
-        Q_new = 0.5 * (Q_new + Q_new.T)
-        w, v = np.linalg.eigh(Q_new)
-        w = np.clip(w, r_floor, None)
-        Q_new = (v * w) @ v.T
-        r_new = float((((za - Xs0)**2).sum() + Ps00.sum()) / T)
-        r = max(r_new, r_floor)
-        q00, q01, q11 = float(Q_new[0, 0]), float(Q_new[0, 1]), float(Q_new[1, 1])
-
-    (xp0, xp1, pp00, pp01, pp11, xf0, xf1,
-     pf00, pf01, pf11, _, _, ll) = forward(q00, q01, q11, r)
+    X_f, P_f, _, _, _, ll = _cv_forward(Z, x0, P0, F, Q, r)
     loglik_hist.append(ll)
-    Q = np.array([[q00, q01], [q01, q11]])
-    R = np.array([[r]])
-    x_last = np.array([[xf0[-1]], [xf1[-1]]])
-    P_last = np.array([[pf00[-1], pf01[-1]], [pf01[-1], pf11[-1]]])
-    return Q, R, x_last, P_last, loglik_hist
+    return Q, np.array([[r]]), X_f[-1].copy(), P_f[-1].copy(), loglik_hist
 
 
 def em_fit(prices, x0, P0, Q0, R0, F=_F, H=_H, n_iter=5, r_floor=1e-12):
