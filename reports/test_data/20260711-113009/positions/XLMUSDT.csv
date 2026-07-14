@@ -1,0 +1,2 @@
+side,size,entry_signal_dt,entry_dt,exit_signal_dt,exit_dt,entry_price,exit_price,bars_held,pnl,pnlcomm
+LONG,10501.995379122034,2026-07-10T13:56:59,2026-07-10T13:57:59,2026-07-10T14:38:59,2026-07-10T14:39:59,0.19043,0.18858,42,-19.428691,-20.224764

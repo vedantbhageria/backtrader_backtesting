@@ -19,6 +19,9 @@ import backtrader as bt
 
 from EMACrossShortTest import EMACrossShortTest
 from KalmanFilter import KalmanTest
+from ExtendedKalmanFilter import ExtendedKalmanTest
+from AccelerationKalmanFilter import AccelerationKalmanTest
+from EMAlgoTest import EMTest
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, 'datas')
@@ -46,25 +49,44 @@ RISK_FREE_ANNUAL = 0.06
 # Swap the strategy by changing these two lines. Any PortfolioStrategy
 # subclass works (see strategy_base.py); its build_chart_lines() drives the
 # dashboard overlays, and STRATEGY_PARAMS is recorded in results.json.
-STRATEGY = KalmanTest
+STRATEGY = EMTest
 
+# EMTest (EMAlgoTest.py) is the 2-state constant-velocity model with periodic
+# EM refits of Q, R -- it does NOT take q_acc/k_exit/drag_m/etc (those are
+# ExtendedKalmanTest-only params; passing them here raises "PortfolioStrategy
+# .__init__() got an unexpected keyword argument" since they're unrecognized).
 STRATEGY_PARAMS = dict(
     trade_usd=2000.0,
-    k=1.5,
+    k=2,             # TUNED: wider bands (k=2 over-traded, ~lost; 3 too few trades)
+    warmup=180,
+    reversion=False,
+    q_level=0.1e-3,    # INITIAL seed only -- EM re-learns Q,R from data after warmup
+    q_vel=0.1e-6,
+    em_window=720,     # bars of rolling history each EM refit uses
+    em_interval=1440,  # TUNED: refit rarely (frequent refits overfit Q,R to noise)
+    em_iters=2,        # TUNED: few EM iters (5-10 overfit; 2 generalizes better)
+)
+
+"""STRATEGY_PARAMS = dict(     # ExtendedKalmanTest (ExtendedKalmanFilter.py)
+    trade_usd=2000.0,
+    k=2,
     a=7,
     warmup=180,
     reversion=False,
     q_level = 0.1e-3,
     q_vel = 0.1e-6,
-)
-"""STRATEGY_PARAMS = dict(
+    q_acc = 0.1e-6,
+    k_exit = 0.0,     # TUNED: dead zone OFF (it cut reversions short, ~7x worse)
+    min_hold = 1,     # TUNED: no minimum hold; delaying reversals hurt
+    cost_mult = 0.0,  # TUNED: cost gate off (no measurable benefit)
+    drag_m = 0.001,   # TUNED: drag sweet spot (1e-4 over-damps, off is weaker)
+    c_d_window = 180, # rolling window for the live c_d regime estimate
+    trend_bias = False,# dropped: trend-follow gate fights a mean-reversion entry
+)"""
+"""STRATEGY_PARAMS = dict(     # EMACrossShortTest
     fast_ema_period =  60,
     slow_ema_period =  120,
 )"""
-
-# EMA alternative:
-# STRATEGY = EMACrossShortTest
-# STRATEGY_PARAMS = dict(trade_usd=2000.0, fast_ema_period=15, slow_ema_period=30)
 
 BACKTEST_DAYS = 7
 BACKTEST_END = None   # 'YYYY-MM-DD HH:MM' (UTC), or None = latest available bar
@@ -401,11 +423,28 @@ def _write_report_xlsx(out_dir, config_rows, stats, run_tag):
     cfg = pd.DataFrame(config_rows, columns=['setting', 'value'])
     ps = pd.Series(stats or {}, dtype=object).rename('value')
     ps.index.name = 'metric'
-    path = os.path.join(out_dir, 'report.xlsx')
-    with pd.ExcelWriter(path, engine='openpyxl') as xl:
-        cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
-        ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
 
+    def _dump(path, append):
+        # config on top, perf stats below, in one sheet named by the run.
+        kw = dict(engine='openpyxl')
+        if append:
+            kw.update(mode='a', if_sheet_exists='overlay')
+        with pd.ExcelWriter(path, **kw) as xl:
+            cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
+            ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
+
+    try:
+        _dump(os.path.join(out_dir, 'report.xlsx'), append=False)
+    except Exception as e:
+        print('[backtest] per-run xlsx failed: %s' % e)
+
+    strat_name = dict(config_rows).get('strategy', 'strategy')
+    hist = os.path.join(REPORTS, 'historical_reports_%s.xlsx' % strat_name)
+    try:
+        _dump(hist, append=os.path.exists(hist))
+    except Exception as e:
+        print('[backtest] historical xlsx (%s) failed: %s' % (os.path.basename(hist), e))
+    
     path = os.path.join(REPORTS, 'historical_reports.xlsx')
     with pd.ExcelWriter(path, engine = "openpyxl", mode="a", if_sheet_exists="overlay") as xl:
         cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
@@ -557,10 +596,15 @@ def run():
         n_won = _dget(ta, 'won', 'total')
         n_lost = _dget(ta, 'lost', 'total')
 
-        # Risk metrics from the minute-level equity curve. Same helper the
-        # pyfolio stats table uses, so the cards and the table always agree.
-        eq = [v for _, v in strat.equity]
-        rets = [0] + ([(b - a) / a for a, b in zip(eq, eq[1:]) if a] if len(eq) > 2 else [])
+        # Risk metrics from pyfolio's whole-portfolio minute returns — the SAME
+        # series the stats table uses, so the cards and the table always agree.
+        # (The old path derived returns from strat.equity, which is clocked to
+        # datas[0] only and rounded to 4 dp, so it diverged from pyfolio whenever
+        # that first symbol didn't span the full window — a different day count
+        # after the 1440-bar resample, hence a different Sharpe.)
+        pyf = strat.analyzers.getbyname('pyfolio')
+        pf_returns, _pf_pos, _pf_txn, _pf_lev = pyf.get_pf_items()
+        rets = list(pf_returns.dropna().values)
 
         rm = _risk_metrics(rets)
         rnd = lambda k, d=4: (None if rm.get(k) is None or rm.get(k) != rm.get(k)

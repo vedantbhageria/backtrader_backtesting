@@ -279,7 +279,7 @@ def main():
     started = time.time()
     now = datetime.now(timezone.utc)
     end_ms = int(now.timestamp() * 1000)
-    start_ms = end_ms - 90 * 86_400_000
+    start_ms = end_ms - 180 * 86_400_000
     start_dt, end_dt = _ms_to_dt(start_ms), _ms_to_dt(end_ms)
 
     conn = None

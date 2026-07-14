@@ -121,6 +121,11 @@
      an opaque background) so the shading is actually visible; pointer-events
      off so zoom/pan still reach the chart underneath. */
   #posoverlay { position: absolute; top: 0; left: 0; z-index: 4; pointer-events: none; }
+  #resetview { position: absolute; top: 8px; left: 8px; z-index: 5;
+               width: 26px; height: 24px; padding: 0; line-height: 1; font-size: 14px;
+               color: var(--text); background: rgba(22,29,41,.85);
+               border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+  #resetview:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
   #chartcontrols { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
                    margin: 0 0 10px; font-size: 13px; user-select: none; }
   #chartcontrols label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
@@ -143,6 +148,10 @@
   #postbl td.num, #postbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
   #postbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
   #postbl tbody tr { cursor: pointer; }
+  .jumpbtn { background: var(--panel2); color: var(--accent); border: 1px solid var(--border);
+             border-radius: 5px; width: 22px; height: 20px; line-height: 1; padding: 0;
+             font-size: 12px; cursor: pointer; }
+  .jumpbtn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
   #postbl tbody tr:hover td { background: var(--panel2); }
   #postbl tbody tr.selrow td { background: rgba(88,166,255,.14); }
   .side { font-weight: 600; font-size: 11px; padding: 1px 7px; border-radius: 4px; }
@@ -205,14 +214,15 @@
       <div id="symstats"></div>
       <div id="chartcontrols">
         <label><input type="checkbox" id="shadechk"> Shade positions</label>
-        <label><input type="checkbox" id="markerschk" checked> Buy/Sell markers</label>
+        <label><input type="checkbox" id="markerschk"> Buy/Sell markers</label>
         <span id="linetoggles"></span>
       </div>
       <div id="chartwrap">
         <div id="chartdiv"></div>
         <canvas id="posoverlay"></canvas>
+        <button id="resetview" title="Reset to default view (markers &amp; indicators off, zoom reset)">⟲</button>
       </div>
-      <p class="note" id="charthint">Scroll to zoom · drag to pan · double-click to reset · click a row below to jump to it</p>
+      <p class="note" id="charthint">Scroll to zoom · drag to pan · double-click to reset</p>
       <div id="positions"></div>
     </div>
   </section>
@@ -336,43 +346,90 @@ function drawPosOverlay() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (!chart || !$('shadechk').checked || !curPositions.length) return;
+  if (!chart || !curPositions.length) return;
 
   const ts = chart.timeScale();
   const vr = ts.getVisibleRange();
   if (!vr) return;
-  curPositions.forEach((p, i) => {
-    const e = toEpoch(p.entry_dt), x = toEpoch(p.exit_dt);
-    if (e == null || x == null || x < vr.from || e > vr.to) return;   // off-screen
-    
-    let xa = ts.timeToCoordinate(Math.max(e, vr.from));
-    let xb = ts.timeToCoordinate(Math.min(x, vr.to));
-    if (xa == null || xb == null) return;
-    if (xb < xa) { const t = xa; xa = xb; xb = t; }
-    const win = p.pnlcomm >= 0;
-    ctx.fillStyle = win ? 'rgba(38,166,154,0.20)' : 'rgba(239,83,80,0.20)';
-    ctx.fillRect(xa, 0, Math.max(1, xb - xa), h);
-    if (i === selPos) {                       // outline the selected position
-      ctx.strokeStyle = win ? 'rgba(38,166,154,0.95)' : 'rgba(239,83,80,0.95)';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(xa + 0.5, 1, Math.max(1, xb - xa) - 1, h - 2);
-    }
-  });
-}
+  const shade = $('shadechk').checked;
+  const xCoord = t => (t < vr.from || t > vr.to) ? null
+                    : ts.timeToCoordinate(Math.max(vr.from, Math.min(vr.to, t)));
+  // Clamps into the visible range instead of nulling out-of-range times, so a
+  // position whose entry or exit is off-screen still shades the visible part
+  // of its span (used for fills; xCoord above stays as-is for point markers
+  // like the dotted highlight lines, which should vanish when off-screen).
+  const clampX = t => ts.timeToCoordinate(Math.max(vr.from, Math.min(vr.to, t)));
 
-// Clicking a position row zooms the chart to that trade's window.
-function focusPosition(i) {
+  // 1) shading of every position (only when the toggle is on)
+  if (shade) {
+    curPositions.forEach((p, i) => {
+      const e = toEpoch(p.entry_dt), x = toEpoch(p.exit_dt);
+      if (e == null || x == null || x < vr.from || e > vr.to) return;  // off-screen
+      let xa = clampX(e), xb = clampX(x);
+      if (xa == null || xb == null) return;
+      if (xb < xa) { const t = xa; xa = xb; xb = t; }
+      const win = p.pnlcomm >= 0;
+      ctx.fillStyle = win ? 'rgba(38,166,154,0.20)' : 'rgba(239,83,80,0.20)';
+      ctx.fillRect(xa, 0, Math.max(1, xb - xa), h);
+      if (i === selPos) {                     // outline the selected position
+        ctx.strokeStyle = win ? 'rgba(38,166,154,0.95)' : 'rgba(239,83,80,0.95)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(xa + 0.5, 1, Math.max(1, xb - xa) - 1, h - 2);
+      }
+    });
+  }
+
+  // 2) selected position, shade OFF -> grey dotted lines through its entry/exit
+  //    (the trade markers), so a highlight is always visible.
+  if (!shade && selPos >= 0 && curPositions[selPos]) {
+    const p = curPositions[selPos];
+    ctx.save();
+    ctx.strokeStyle = 'rgba(180,190,205,0.85)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    [toEpoch(p.entry_dt), toEpoch(p.exit_dt)].forEach(t => {
+      const xc = xCoord(t);
+      if (xc == null) return;
+      ctx.beginPath(); ctx.moveTo(xc + 0.5, 0); ctx.lineTo(xc + 0.5, h); ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+$('shadechk').onchange = drawPosOverlay;
+
+// Set (or clear, i = -1) the highlighted position and repaint.
+function setHighlight(i) {
+  selPos = i;
+  document.querySelectorAll('#postbl tbody tr').forEach((tr, j) =>
+    tr.classList.toggle('selrow', j === i));
+  drawPosOverlay();   // draw immediately (rAF can be throttled when offscreen)
+}
+// Row click: toggle the highlight on/off (no chart movement).
+function highlightPosition(i) { setHighlight(selPos === i ? -1 : i); }
+// Jump button: zoom the chart to the trade's window AND highlight it.
+function jumpToPosition(i) {
   const p = curPositions[i];
   if (!p || !chart) return;
-  selPos = i;
   const e = toEpoch(p.entry_dt), x = toEpoch(p.exit_dt);
   const pad = Math.max(60, (x - e) * 0.4);    // 40% padding, min 1 minute
   chart.timeScale().setVisibleRange({ from: e - pad, to: x + pad });
-  document.querySelectorAll('#postbl tbody tr').forEach((tr, j) =>
-    tr.classList.toggle('selrow', j === i));
-  requestAnimationFrame(drawPosOverlay);
+  setHighlight(i);
 }
-$('shadechk').onchange = drawPosOverlay;
+
+// Reset to the default view: markers off, all indicators off, no highlight,
+// zoom fit. Also the state a freshly opened chart starts in.
+function resetView() {
+  if (!chart) return;
+  $('markerschk').checked = false; applyMarkers();
+  document.querySelectorAll('#linetoggles input').forEach(chk => {
+    chk.checked = false;
+    chk.dispatchEvent(new Event('change'));
+  });
+  setHighlight(-1);
+  chart.timeScale().fitContent();
+  drawPosOverlay();
+}
+$('resetview').onclick = resetView;
 
 // Show/hide the buy/sell markers (uses the checkbox state).
 function applyMarkers() {
@@ -385,8 +442,9 @@ function buildLineToggles(lineSeries) {
   const box = $('linetoggles');
   box.innerHTML = '';
   lineSeries.forEach(L => {
+    L.series.applyOptions({ visible: false });   // default view: indicators off
     const lbl = document.createElement('label');
-    lbl.innerHTML = `<input type="checkbox" checked>
+    lbl.innerHTML = `<input type="checkbox">
       <span class="swatch" style="background:${L.color}"></span>${L.name}`;
     lbl.querySelector('input').onchange = e =>
       L.series.applyOptions({ visible: e.target.checked });
@@ -405,6 +463,7 @@ function renderPositions(sym, positions) {
   const rows = positions.map((p, i) => {
     const net = p.pnlcomm;
     return `<tr>
+      <td><button class="jumpbtn" data-i="${i}" title="Jump to this trade on the chart">⤢</button></td>
       <td>${i + 1}</td>
       <td><span class="side ${p.side === 'LONG' ? 'long' : 'short'}">${p.side}</span></td>
       <td>${dt(p.entry_dt)}</td>
@@ -421,16 +480,19 @@ function renderPositions(sym, positions) {
     `<div class="poshead">
        <b>${sym}</b> — ${positions.length} position${positions.length > 1 ? 's' : ''}
        <span class="${total >= 0 ? 'pos' : 'neg'}">net ${fmt(total)} USDT</span>
+       <span class="note">click a row to highlight (click again to clear) · ⤢ jumps to it</span>
      </div>
      <div class="posscroll"><table id="postbl">
-       <thead><tr><th>#</th><th>Side</th><th>Entry</th><th>Exit</th>
+       <thead><tr><th></th><th>#</th><th>Side</th><th>Entry</th><th>Exit</th>
          <th class="num">Entry px</th><th class="num">Exit px</th>
          <th class="num">Size</th><th class="num">Bars</th>
          <th class="num">Net PnL</th></tr></thead>
        <tbody>${rows}</tbody>
      </table></div>`;
   box.querySelectorAll('#postbl tbody tr').forEach((tr, i) =>
-    tr.onclick = () => focusPosition(i));
+    tr.onclick = () => highlightPosition(i));
+  box.querySelectorAll('.jumpbtn').forEach(btn =>
+    btn.onclick = e => { e.stopPropagation(); jumpToPosition(+btn.dataset.i); });
 }
 
 async function loadChart(sym) {

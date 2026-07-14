@@ -17,6 +17,7 @@ class PortfolioStrategy(bt.Strategy):
     params = (
         ('trade_usd', 2000.0),
         ('printlog', False),
+        ('diag', False),      # record per-bar Kalman internals into self._diag
     )
 
     def setup(self):
@@ -46,12 +47,33 @@ class PortfolioStrategy(bt.Strategy):
         self._open_trades = {}  # trade.ref -> opening info (set on justopened)
         self._order_sig = {}   # order.ref -> signal-bar datetime (when decided)
         self._fill_sig = {}    # data -> signal dt of the fill being processed now
+        self._diag = {}        # symbol -> [per-bar Kalman internals] (when p.diag)
 
         for d in self.datas:
             self._last_len[d] = 0
             self.executed[d._name] = []
 
         self.setup()
+
+    def _diag_record(self, d, price, y_pred, innov, S, band, st):
+        """Record one bar of Kalman internals for offline analysis (notebook).
+        No-op unless the `diag` param is on, so live/dashboard runs are
+        unaffected. Captures the a-posteriori state X and covariance P (upper
+        triangle), the prediction + bands, the innovation and its variance S.
+        Works for any state size (2-state KF, 3-state EKF)."""
+        if not self.params.diag:
+            return
+        X, P = st['X'], st['P']            # a-posteriori (set inside _step)
+        rec = {'t': self.bar_epoch(d), 'price': price, 'pred': y_pred,
+               'upper': y_pred + band, 'lower': y_pred - band,
+               'innov': innov, 'S': S, 'band': band}
+        n = X.shape[0]
+        for i in range(n):
+            rec['x%d' % i] = float(X[i, 0])
+        for i in range(n):
+            for j in range(i, n):          # upper triangle (P is symmetric)
+                rec['P%d%d' % (i, j)] = float(P[i, j])
+        self._diag.setdefault(d._name, []).append(rec)
 
     def bar_epoch(self, d):
         """Epoch seconds of the current bar on feed `d` (for chart points)."""
@@ -142,6 +164,17 @@ class PortfolioStrategy(bt.Strategy):
                 signal, size = result
             else:
                 signal, size = result, None
+
+            # Explicit flatten: on_bar returns (0, 0) -> go to cash. A bare
+            # scalar 0 still means "hold / no change" (backward compatible).
+            if signal == 0 and size == 0:
+                if self.getposition(d).size != 0:
+                    order = self.order_target_size(data=d, target=0)
+                    if order is not None:
+                        self.orders[d] = order
+                        self._order_sig[order.ref] = d.datetime.datetime(0).isoformat()
+                continue
+
             if not signal:
                 continue
 

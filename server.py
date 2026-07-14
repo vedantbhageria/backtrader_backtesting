@@ -14,6 +14,9 @@ import db
 import strategy_base
 import EMACrossShortTest
 import KalmanFilter
+import ExtendedKalmanFilter
+import AccelerationKalmanFilter
+import EMAlgoTest
 import run_backtest
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -75,12 +78,21 @@ def run():
     # before the strategies that import them, and run_backtest last (it imports
     # the strategies). Missing a module here means the button silently runs
     # stale code — the reason edits to strategy_base/KalmanFilter didn't apply.
-    global db, strategy_base, EMACrossShortTest, KalmanFilter, run_backtest
+    global db, strategy_base, EMACrossShortTest, KalmanFilter, EMAlgoTest, run_backtest
+    global ExtendedKalmanFilter, AccelerationKalmanFilter
     try:
         db = importlib.reload(db)
         strategy_base = importlib.reload(strategy_base)
         EMACrossShortTest = importlib.reload(EMACrossShortTest)
         KalmanFilter = importlib.reload(KalmanFilter)
+        EMAlgoTest = importlib.reload(EMAlgoTest)
+        # Leaf strategy modules MUST reload before run_backtest, which does
+        # `from <module> import <Strategy>`. If run_backtest reloads first it
+        # captures a stale class, then reloading the strategy module in place
+        # rebinds that class's globals — mixing old methods with new functions
+        # (e.g. old f_func + new estimatefuture -> arg-count crash).
+        ExtendedKalmanFilter = importlib.reload(ExtendedKalmanFilter)
+        AccelerationKalmanFilter = importlib.reload(AccelerationKalmanFilter)
         run_backtest = importlib.reload(run_backtest)
     except Exception as e:
         return JSONResponse({'error': 'reload failed: %s' % e}, status_code=500)

@@ -99,6 +99,7 @@ class KalmanTest(PortfolioStrategy):
         self._chart[d._name].append((self.bar_epoch(d), round(y_pred, 8),
                                      round(y_pred + band, 8),
                                      round(y_pred - band, 8)))
+        self._diag_record(d, price, y_pred, innov, S, band, st)
         if band <= 0:
             return 0
         
