@@ -208,8 +208,8 @@
                      border: 1px solid var(--border); border-radius: 7px;
                      padding: 7px 8px; font-size: 13px; outline: none; }
   .syncgroup input:focus { border-color: var(--accent); }
-  #cfgpanel, #reppanel { max-width: 1500px; margin: 14px auto 0; padding: 0 24px; }
-  #cfgpanel .panel-b, #reppanel .panel-b { display: flex; flex-wrap: wrap;
+  #cfgpanel { max-width: 1500px; margin: 14px auto 0; padding: 0 24px; }
+  #cfgpanel .panel-b, #tab-report .panel-b { display: flex; flex-wrap: wrap;
                        gap: 14px 22px; align-items: flex-end; }
   #repstrats { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
   .repstrat { border: 1px solid var(--border); border-radius: 8px;
@@ -221,12 +221,12 @@
   .repstrat[open] summary::before { content: '▾'; }
   .repstrat .repparams { display: flex; flex-wrap: wrap; gap: 10px 18px;
                          padding: 4px 14px 12px; }
-  #repbuild { background: #238636; color: #fff; border: 1px solid #2ea043;
+  #repbuild, #jobsubmit { background: #238636; color: #fff; border: 1px solid #2ea043;
               border-radius: 7px; padding: 5px 14px; font-size: 12px;
               font-weight: 600; cursor: pointer; text-transform: none;
               letter-spacing: 0; }
-  #repbuild:hover:not(:disabled) { background: #2ea043; }
-  #repbuild:disabled { background: var(--panel2); border-color: var(--border);
+  #repbuild:hover:not(:disabled), #jobsubmit:hover:not(:disabled) { background: #2ea043; }
+  #repbuild:disabled, #jobsubmit:disabled { background: var(--panel2); border-color: var(--border);
                        color: var(--faint); cursor: default; }
   .cfgfield { display: flex; flex-direction: column; gap: 4px; }
   .cfgfield label { font-size: 10.5px; color: var(--muted);
@@ -278,15 +278,99 @@
   .modetab { background: var(--panel2); color: var(--muted); border: 1px solid var(--border);
              border-radius: 7px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; }
   .modetab.active { color: var(--text); border-color: var(--accent); }
-  #loadpanel { max-width: 1500px; margin: 14px auto 0; padding: 0 24px; }
-  #loadtbl, #datatbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-  #loadtbl th, #loadtbl td, #datatbl th, #datatbl td
+    #loadtbl, #datatbl, #jobtbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #loadtbl th, #loadtbl td, #datatbl th, #datatbl td, #jobtbl th, #jobtbl td
     { padding: 7px 14px; text-align: left; white-space: nowrap; }
-  #datatbl td.num, #datatbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  #datatbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
-  #datatbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+  #datatbl td.num, #datatbl th.num, #jobtbl td.num, #jobtbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #datatbl tbody tr:nth-child(odd) td, #jobtbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #datatbl th, #jobtbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
     font-weight: 600; border-bottom: 1px solid var(--border); }
   #datatbl td.bad { color: var(--red); }
+  /* ---------- dark scrollbars everywhere ---------- */
+  * { scrollbar-width: thin; scrollbar-color: #2a3547 transparent; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a3547; border-radius: 5px;
+    border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4860; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  /* ---------- new-backtests builder + staging queue ---------- */
+  #newbt > summary { display: flex; align-items: baseline; gap: 14px; cursor: pointer;
+    padding: 12px 16px; font-size: 13px; font-weight: 600; list-style: none;
+    user-select: none; }
+  #newbt > summary::-webkit-details-marker { display: none; }
+  #newbt > summary::before { content: '▸'; color: var(--muted); }
+  #newbt[open] > summary::before { content: '▾'; }
+  .nb-flex { display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    border-top: 1px solid var(--border); }
+  @media (max-width: 1000px) { .nb-flex { grid-template-columns: 1fr; } }
+  .nb-col { padding: 14px 16px; min-width: 0; }
+  .nb-col + .nb-col { border-left: 1px solid var(--border); }
+  .nb-h { font-size: 11.5px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+  .nb-fields { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end;
+    margin-bottom: 4px; }
+  #stagelist { display: flex; flex-direction: column; gap: 8px;
+    max-height: 300px; overflow-y: auto; }
+  .stageitem { display: flex; align-items: center; gap: 10px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; }
+  .stageitem .si-what { font-weight: 600; white-space: nowrap; }
+  .stageitem .si-params { color: var(--muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .stageitem .si-batch { font-size: 10.5px; border-radius: 9px; padding: 1px 8px;
+    white-space: nowrap; }
+  .stageitem .si-batch.batch { color: var(--amber); border: 1px solid var(--amber); }
+  .stageitem .si-batch.single { color: var(--muted); border: 1px solid var(--border); }
+  .stageitem .si-x { color: var(--faint); cursor: pointer; }
+  .stageitem .si-x:hover { color: var(--red); }
+  /* ---------- backtest job cards ---------- */
+  #jobgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 14px; padding: 16px; }
+  .jobcard { background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 13px 15px 11px; position: relative;
+    border-left: 3px solid var(--muted); display: flex; flex-direction: column; gap: 8px; }
+  .jobcard.st-running { border-left-color: var(--accent); }
+  .jobcard.st-done { border-left-color: var(--green); }
+  .jobcard.st-error, .jobcard.st-cancelled { border-left-color: var(--red); }
+  .jc-head { display: flex; align-items: baseline; gap: 8px; }
+  .jc-strat { font-weight: 700; font-size: 13.5px; }
+  .jc-head .chip { font-size: 10.5px; color: var(--muted); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 9px; padding: 1px 7px; }
+  .jc-id { margin-left: auto; color: var(--faint); font-size: 10.5px; }
+  .jc-params { color: var(--muted); font-size: 11.5px; line-height: 1.5;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; min-height: 17px; }
+  .jc-state { font-size: 11.5px; font-weight: 600; }
+  .jc-state.st-running { color: var(--accent); }
+  .jc-state.st-queued { color: var(--muted); }
+  .jc-state.st-error, .jc-state.st-cancelled { color: var(--red); }
+  .jc-state.st-done { color: var(--green); }
+  .jc-progress { height: 5px; background: var(--panel); border-radius: 3px; overflow: hidden; }
+  .jc-progress > div { height: 100%; background: var(--accent); border-radius: 3px;
+    transition: width .6s; }
+  .jc-progress.indet > div { width: 30% !important; animation: jcslide 1.4s ease-in-out infinite alternate; }
+  @keyframes jcslide { from { margin-left: 0; } to { margin-left: 70%; } }
+  .jc-spark { width: 100%; height: 46px; display: block; }
+  .jc-stats { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+  .jc-pnl { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .jc-stat { font-size: 11px; color: var(--muted); }
+  .jc-stat b { color: var(--text); font-weight: 600; font-size: 12px; }
+  .jc-actions { display: flex; gap: 8px; margin-top: 2px; }
+  .jc-err { color: var(--red); font-size: 11.5px; word-break: break-word; }
+  /* ---------- dynamic per-backtest tabs + sub-bar ---------- */
+  nav .tab.dyn .closex { margin-left: 7px; color: var(--faint); font-size: 11px; }
+  nav .tab.dyn .closex:hover { color: var(--red); }
+  #viewbar { max-width: 1500px; margin: 0 auto 14px; padding: 0 24px;
+    display: flex; align-items: center; gap: 14px; }
+  #viewbar[hidden] { display: none; }
+  #viewtitle { color: var(--muted); font-size: 12.5px; }
+  #viewbar .vb-tabs { display: inline-flex; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  #viewbar .vb-tabs button { background: transparent; border: 0; color: var(--muted);
+    padding: 6px 18px; font-size: 12.5px; cursor: pointer; }
+  #viewbar .vb-tabs button.active { background: var(--panel2); color: var(--text);
+    font-weight: 600; }
   #datatbl td.ok { color: var(--green); }
   /* ---------- saved-configs tab ---------- */
   #cfgstbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
@@ -361,129 +445,13 @@
   <div class="brand">
     <div class="dot"></div>
     <h1>Backtrader Dashboard</h1>
-    <div id="meta"></div>
   </div>
   <div class="runbox">
     <span id="runstatus"></span>
     <span id="repstatus" class="tinynote"></span>
-    <span class="tgroup">
-      <button id="loadbtn" class="ghostbtn" title="Load a saved backtest (PnL + positions)">Load</button>
-      <button id="repbtn" class="ghostbtn" title="Comparison report">Report</button>
-      <button id="cfgbtn" class="ghostbtn" title="Strategy, timeframe, params, data sync">⚙ Config</button>
-      <button id="logbtn" class="ghostbtn" title="Server log (run warnings, excluded symbols, errors)">Logs</button>
-    </span>
-    <span class="tsep"></span>
-    <button id="runbtn">Run Backtest</button>
+    <button id="logbtn" class="ghostbtn" title="Server log (run warnings, excluded symbols, errors)">Logs</button>
   </div>
 </header>
-<div id="cfgpanel" hidden>
-  <div class="panel">
-    <div class="panel-h"><span>Run configuration</span>
-      <button id="cfgreset">reset to defaults</button></div>
-    <div class="panel-b" id="cfgbody">
-      <div class="cfgfield">
-        <label for="cfgstrategy">Strategy</label>
-        <select id="cfgstrategy"></select>
-      </div>
-      <div class="cfgfield">
-        <label for="cfgtf">Bar timeframe</label>
-        <select id="cfgtf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
-      </div>
-      <div class="cfgfield">
-        <label for="cfgdays">Backtest days</label>
-        <input id="cfgdays" type="number" min="1" step="1">
-      </div>
-      <span id="cfgparams" style="display:contents"></span>
-      <div style="flex-basis:100%;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
-        <div class="cfgfield">
-          <label for="cfgsavename">Config name</label>
-          <input id="cfgsavename" type="text" placeholder="e.g. fade-tuned-v2">
-        </div>
-        <button id="cfgsave" class="ghostbtn" title="Save these params for this strategy + timeframe (see the Configs tab)">💾 Save config (1m)</button>
-        <span id="cfgsavestatus" class="tinynote"></span>
-      </div>
-      <p class="note" id="cfgnote">These settings apply to the next <b>Run Backtest</b>.
-        Unchanged fields use the strategy's tuned defaults — or your saved
-        <b>default</b> config for this strategy + timeframe (Configs tab).</p>
-    </div>
-    <div class="panel-h" style="border-top:1px solid var(--border)"><span>Data &amp; modules</span></div>
-    <div class="panel-b" style="display:flex;flex-wrap:wrap;gap:14px 22px;align-items:flex-end">
-      <div class="cfgfield">
-        <label for="syncdays">Sync days</label>
-        <input id="syncdays" type="number" min="1" step="1" value="180">
-      </div>
-      <div class="cfgfield">
-        <label for="synctf">Sync timeframe</label>
-        <select id="synctf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
-      </div>
-      <button id="syncbtn" class="ghostbtn">Sync data</button>
-      <button id="latestbtn" class="ghostbtn" title="Last stored bar per symbol for the selected timeframe">Latest bars</button>
-      <button id="integbtn" class="ghostbtn" title="Check every symbol for holes in the stored bars">Integrity check</button>
-      <button id="reloadbtn" class="ghostbtn" title="Reload strategy code &amp; default params from disk">↻ Reload strategies</button>
-      <span id="syncstatus" class="tinynote"></span>
-      <p class="note" style="flex-basis:100%">Sync downloads only the bars missing from
-        postgres for the chosen timeframe. Latest bars / Integrity check inspect what's
-        stored for that timeframe. Reload picks up code / default-param edits without a run.</p>
-      <div id="datastatus" class="histscroll" style="flex-basis:100%;max-height:280px;display:none"></div>
-    </div>
-  </div>
-</div>
-<div id="reppanel" hidden>
-  <div class="panel">
-    <div class="panel-h"><span>Comparison report</span>
-      <button id="repbuild">build report</button></div>
-    <div class="panel-b">
-      <div class="cfgfield" style="flex-basis:100%">
-        <label>Mode</label>
-        <span class="modetabs">
-          <button class="modetab active" data-mode="new">Generate from new data</button>
-          <button class="modetab" data-mode="old">Compare saved runs</button>
-        </span>
-      </div>
-      <div id="repnewbox" style="display:contents">
-        <div class="cfgfield">
-          <label for="repsymbol">Symbol <span class="tinynote">(empty = all symbols, PnL/equity only)</span></label>
-          <input id="repsymbol" type="text" value="ETHUSDT" placeholder="all symbols">
-        </div>
-        <div class="cfgfield">
-          <label for="reptf">Timeframe</label>
-          <select id="reptf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
-        </div>
-        <div class="cfgfield">
-          <label for="repdays">Backtest days <span class="tinynote">(empty = all data)</span></label>
-          <input id="repdays" type="number" min="1" step="1" placeholder="all">
-        </div>
-        <div id="repstrats"></div>
-      </div>
-      <div id="repoldbox" style="display:none;flex-basis:100%">
-        <div id="reptags"></div>
-      </div>
-      <p class="note" id="repnote">Generate: run the ticked strategies fresh on data pulled
-        straight from postgres — one symbol (full filter internals) or all symbols (PnL/equity
-        only), over the last N days or everything. Compare saved: pick past runs to compare
-        their PnL / win-rate / equity (no filter internals — those aren't stored).</p>
-    </div>
-  </div>
-</div>
-
-<div id="loadpanel" hidden>
-  <div class="panel">
-    <div class="panel-h"><span>Load a saved backtest</span>
-      <span class="note"><a href="#" id="loadrefresh">refresh</a> ·
-        <a href="#" id="loadlive">back to latest run</a></span></div>
-    <div class="histscroll">
-      <table id="loadtbl">
-        <thead><tr><th></th><th>Saved (UTC)</th><th>Strategy</th><th>TF</th>
-          <th class="num">PnL</th><th class="num">Return %</th>
-          <th class="num">Trades</th><th class="num">Symbols</th></tr></thead>
-        <tbody id="loadbody"></tbody>
-      </table>
-    </div>
-    <p class="note" style="padding:10px 16px">Loads a run's PnL + positions from its
-      saved folder. Candle/indicator charts aren't reloaded (not stored) — you'll see
-      the Account stats and per-symbol positions only.</p>
-  </div>
-</div>
 
 <!-- floating server-log window (toggle with the Logs button, drag by its title bar) -->
 <div id="logwin" hidden>
@@ -497,9 +465,11 @@
   <pre id="logout"></pre>
 </div>
 <nav>
-  <button class="tab active" data-tab="charts">Charts</button>
-  <button class="tab" data-tab="account">Account</button>
+  <button class="tab active" data-tab="backtests">Backtests</button>
+  <!-- dynamic per-backtest tabs are inserted here -->
   <button class="tab" data-tab="history">History</button>
+  <button class="tab" data-tab="report">Report</button>
+  <button class="tab" data-tab="data">Data</button>
   <button class="tab" data-tab="configs">Configs</button>
   <button class="tab" data-tab="console">Console</button>
 </nav>
@@ -507,7 +477,72 @@
   <div id="empty" hidden>No results yet — press <b>Run Backtest</b>.</div>
   <div id="loadbanner" class="loadbanner" style="display:none"></div>
 
-  <section id="tab-charts">
+  <section id="tab-backtests">
+    <details id="newbt" class="panel">
+      <summary><span>➕ New backtests</span>
+        <span class="tinynote">build a queue, then start them all — ranges
+        (<code>1:4:0.5</code>) and lists (<code>a,b,c</code>) fan out into batches</span></summary>
+      <div class="nb-flex">
+        <div class="nb-col">
+          <div class="nb-h">Configure</div>
+          <div class="nb-fields">
+            <div class="cfgfield">
+              <label for="jobstrategy">Strategy</label>
+              <select id="jobstrategy"></select>
+            </div>
+            <div class="cfgfield">
+              <label for="jobtf">Timeframe</label>
+              <select id="jobtf"><option value="1m">1-minute</option><option value="1h" selected>1-hour</option></select>
+            </div>
+            <div class="cfgfield">
+              <label for="jobdays">Days</label>
+              <input id="jobdays" type="number" min="1" step="1" value="365">
+            </div>
+          </div>
+          <div class="nb-fields" style="margin-top:2px">
+            <div class="cfgfield">
+              <label for="jobcfg">Load saved config <span class="tinynote">(copies values into the blanks)</span></label>
+              <select id="jobcfg"><option value="">—</option></select>
+            </div>
+          </div>
+          <div id="jobparams" class="nb-fields"></div>
+          <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+            <button id="stageadd" class="ghostbtn">＋ Add to queue</button>
+            <button id="jobcfgsave" class="ghostbtn" title="Save the current blanks as a named config (Configs tab)">💾 Save config</button>
+            <span id="stagehint" class="tinynote"></span>
+          </div>
+        </div>
+        <div class="nb-col">
+          <div class="nb-h">Queued to start <span id="stagecount"></span></div>
+          <div id="stagelist"></div>
+          <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+            <button id="jobsubmit">▶ Start backtests</button>
+            <a href="#" id="stageclear" class="note">clear</a>
+            <span id="jobstatus" class="tinynote"></span>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div class="panel" style="margin-top:16px">
+      <div class="panel-h"><span>Backtests</span>
+        <span class="note"><span id="jobsummary"></span></span></div>
+      <div id="jobgrid"></div>
+      <p class="note" style="padding:10px 16px"><b>Open →</b> opens a finished backtest
+        as its own tab (with Charts &amp; Account under it). ✕ removes a finished job
+        from this board — its archive stays in History → saved backtests.</p>
+    </div>
+  </section>
+
+  <div id="viewbar" hidden>
+    <span id="viewtitle"></span>
+    <span class="vb-tabs">
+      <button data-sub="charts" class="active">Charts</button>
+      <button data-sub="account">Account</button>
+    </span>
+  </div>
+
+  <section id="tab-charts" hidden>
     <aside>
       <input id="symsearch" placeholder="Filter symbols...">
       <ul id="symlist"></ul>
@@ -569,6 +604,8 @@
         <span class="hh-tools">
           <input id="histfilter" class="hfilter" placeholder="filter strategy / id / date…">
           <a href="#" id="histrefresh" class="note">refresh</a>
+          <button id="cleartests" class="ghostbtn" title="Delete ALL archived test_data folders and the postgres run history">🗑 clear test history</button>
+          <button id="clearjobs" class="ghostbtn" title="Delete ALL finished job folders (chart data, per-symbol positions)">🗑 clear job history</button>
         </span></div>
       <div class="histscroll">
         <table id="histtbl">
@@ -590,6 +627,87 @@
       </div>
       <p class="note" style="padding:10px 16px" id="histnote">Click a header to sort ·
         type to filter · click a row for its full parameter set.</p>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <div class="panel-h"><span>Load a saved backtest</span>
+        <span class="note"><a href="#" id="loadrefresh">refresh</a> ·
+          <a href="#" id="loadlive">back to latest run</a></span></div>
+      <div class="histscroll">
+        <table id="loadtbl">
+          <thead><tr><th></th><th>Saved (UTC)</th><th>Strategy</th><th>TF</th>
+            <th class="num">PnL</th><th class="num">Return %</th>
+            <th class="num">Trades</th><th class="num">Symbols</th></tr></thead>
+          <tbody id="loadbody"></tbody>
+        </table>
+      </div>
+      <p class="note" style="padding:10px 16px">Loads a run's PnL + positions from its
+        saved folder into the Charts/Account tabs. Candle/indicator charts aren't
+        reloaded (not stored) — you'll see the Account stats and per-symbol
+        positions only.</p>
+    </div>
+  </section>
+
+  <section id="tab-report" hidden>
+    <div class="panel">
+      <div class="panel-h"><span>Comparison report</span>
+        <button id="repbuild">build report</button></div>
+      <div class="panel-b">
+        <div class="cfgfield" style="flex-basis:100%">
+          <label>Mode</label>
+          <span class="modetabs">
+            <button class="modetab active" data-mode="new">Generate from new data</button>
+            <button class="modetab" data-mode="old">Compare saved runs</button>
+          </span>
+        </div>
+        <div id="repnewbox" style="display:contents">
+          <div class="cfgfield">
+            <label for="repsymbol">Symbol <span class="tinynote">(empty = all symbols, PnL/equity only)</span></label>
+            <input id="repsymbol" type="text" value="ETHUSDT" placeholder="all symbols">
+          </div>
+          <div class="cfgfield">
+            <label for="reptf">Timeframe</label>
+            <select id="reptf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
+          </div>
+          <div class="cfgfield">
+            <label for="repdays">Backtest days <span class="tinynote">(empty = all data)</span></label>
+            <input id="repdays" type="number" min="1" step="1" placeholder="all">
+          </div>
+          <div id="repstrats"></div>
+        </div>
+        <div id="repoldbox" style="display:none;flex-basis:100%">
+          <div id="reptags"></div>
+        </div>
+        <p class="note" id="repnote">Generate: run the ticked strategies fresh on data pulled
+          straight from postgres — one symbol (full filter internals) or all symbols (PnL/equity
+          only), over the last N days or everything. Compare saved: pick past runs to compare
+          their PnL / win-rate / equity (no filter internals — those aren't stored).</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-data" hidden>
+    <div class="panel">
+      <div class="panel-h"><span>Market data · sync &amp; integrity</span>
+        <span id="syncstatus" class="tinynote"></span></div>
+      <div class="panel-b" style="display:flex;flex-wrap:wrap;gap:14px 22px;align-items:flex-end">
+        <div class="cfgfield">
+          <label for="syncdays">Sync days</label>
+          <input id="syncdays" type="number" min="1" step="1" value="180">
+        </div>
+        <div class="cfgfield">
+          <label for="synctf">Timeframe</label>
+          <select id="synctf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
+        </div>
+        <button id="syncbtn" class="ghostbtn">⬇ Sync data</button>
+        <button id="latestbtn" class="ghostbtn" title="Last stored bar per symbol for the selected timeframe">Latest bars</button>
+        <button id="integbtn" class="ghostbtn" title="Check every symbol for holes in the stored bars">Integrity check</button>
+        <button id="reloadbtn" class="ghostbtn" title="Reload strategy code &amp; default params from disk">↻ Reload strategies</button>
+        <p class="note" style="flex-basis:100%">Sync downloads only the bars missing from
+          postgres for the chosen timeframe. Latest bars / Integrity check inspect what's
+          stored for that timeframe. Reload picks up code / default-param edits without a run.</p>
+        <div id="datastatus" class="histscroll" style="flex-basis:100%;max-height:420px;display:none"></div>
+      </div>
     </div>
   </section>
 
@@ -661,19 +779,95 @@ function syncSort(tblSel, sort) {
   });
 }
 
-/* ---- tabs ---- */
-document.querySelectorAll('nav .tab').forEach(b => b.onclick = () => {
+/* ---- tabs: static sections + one dynamic tab per opened backtest ---- */
+const STATIC_TABS = ['backtests', 'history', 'report', 'data', 'configs', 'console'];
+let VIEWS = [];          // {id, title, R, subtab} — opened backtests
+let activeView = null;   // id of the active view, or null (a static tab)
+
+function showStaticTab(name) {
+  activeView = null;
+  document.querySelectorAll('nav .tab').forEach(x =>
+    x.classList.toggle('active', x.dataset.tab === name));
+  for (const t of STATIC_TABS) $('tab-' + t).hidden = t !== name;
+  $('viewbar').hidden = true;
+  $('tab-charts').hidden = true;
+  $('tab-account').hidden = true;
+  if (name === 'backtests') { renderJobStrats(); pollJobs(); }
+  if (name === 'configs') loadSavedConfigs();
+  if (name === 'history') { loadHistory(); renderLoadList(); }
+  if (name === 'report') {
+    const render = () => { if (!$('repstrats').childElementCount) renderRepPanel(); };
+    (CFG ? Promise.resolve() : loadConfig()).then(render);
+  }
+  if (name === 'console') $('conin').focus();
+}
+document.querySelectorAll('nav .tab').forEach(b =>
+  b.onclick = () => showStaticTab(b.dataset.tab));
+
+function switchTab(name) { showStaticTab(name); }
+
+function navRenderViews() {
+  document.querySelectorAll('nav .tab.dyn').forEach(x => x.remove());
+  let after = document.querySelector('nav .tab[data-tab="backtests"]');
+  for (const v of VIEWS) {
+    const b = document.createElement('button');
+    b.className = 'tab dyn' + (activeView === v.id ? ' active' : '');
+    b.innerHTML = `${escHtml(v.title)}<span class="closex" title="close">✕</span>`;
+    b.onclick = e => {
+      if (e.target.classList.contains('closex')) closeView(v.id);
+      else activateView(v.id);
+    };
+    after.insertAdjacentElement('afterend', b);
+    after = b;
+  }
+}
+
+function openView(id, title, results, activate = true, subtab = 'charts') {
+  let v = VIEWS.find(x => x.id === id);
+  if (v) { v.R = results; v.title = title; }
+  else { v = {id, title, R: results, subtab}; VIEWS.push(v); }
+  if (activate) activateView(id); else navRenderViews();
+}
+
+function activateView(id) {
+  const v = VIEWS.find(x => x.id === id);
+  if (!v) return;
+  activeView = id;
+  for (const t of STATIC_TABS) $('tab-' + t).hidden = true;
   document.querySelectorAll('nav .tab').forEach(x => x.classList.remove('active'));
-  b.classList.add('active');
-  $('tab-charts').hidden = b.dataset.tab !== 'charts';
-  $('tab-account').hidden = b.dataset.tab !== 'account';
-  $('tab-history').hidden = b.dataset.tab !== 'history';
-  $('tab-configs').hidden = b.dataset.tab !== 'configs';
-  $('tab-console').hidden = b.dataset.tab !== 'console';
-  if (b.dataset.tab === 'configs') loadSavedConfigs();
-  if (b.dataset.tab === 'history') loadHistory();
-  if (b.dataset.tab === 'console') $('conin').focus();
-});
+  $('viewbar').hidden = false;
+  $('viewtitle').textContent = v.title;
+  showSubtab(v);            // unhide the pane BEFORE the chart measures it
+  navRenderViews();
+  R = v.R;
+  selected = null;
+  applyResults();
+}
+
+function showSubtab(v) {
+  $('tab-charts').hidden = v.subtab !== 'charts';
+  $('tab-account').hidden = v.subtab !== 'account';
+  document.querySelectorAll('#viewbar .vb-tabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.sub === v.subtab));
+}
+document.querySelectorAll('#viewbar .vb-tabs button').forEach(b =>
+  b.onclick = () => {
+    const v = VIEWS.find(x => x.id === activeView);
+    if (v) { v.subtab = b.dataset.sub; showSubtab(v); }
+  });
+
+function closeView(id) {
+  VIEWS = VIEWS.filter(x => x.id !== id);
+  if (activeView === id) showStaticTab('backtests');
+  else navRenderViews();
+}
+
+function viewTitle(res) {
+  const p = res.params || {};
+  const tag = res.job_id ? ' · ' + res.job_id.slice(-2)
+            : res.loaded_from ? ' 📁' : '';
+  return `${p.strategy || 'run'} ${p.timeframe || ''}${tag}`;
+}
 
 /* ---- charts tab ---- */
 function renderSymbols() {
@@ -939,7 +1133,8 @@ async function loadChart(sym) {
 
   let cd;
   try {
-    cd = await (await fetch(`/reports/chartdata/${sym}.json?v=${encodeURIComponent(R.generated)}`)).json();
+    const cbase = R.chartbase || '/reports/chartdata';
+    cd = await (await fetch(`${cbase}/${sym}.json?v=${encodeURIComponent(R.generated)}`)).json();
   } catch (e) { return; }
   if (gen !== chartGen) return;   // a newer load started while we awaited
 
@@ -1081,31 +1276,23 @@ function drawEquity(eq) {
 }
 
 /* ---- load + run ---- */
-async function loadResults() {
+async function loadResults(activate = false) {
   const r = await fetch('/api/results');
   if (!r.ok) { $('empty').hidden = false; return; }
-  R = await r.json();
-  applyResults();
+  const data = await r.json();
+  $('empty').hidden = true;
+  R = data;                                   // config-panel seeding reads this
+  openView(data.job_id || 'latest', viewTitle(data), data, activate);
 }
 
 // Render whatever is in the global R (live run OR an archived load).
 function applyResults() {
   $('empty').hidden = true;
+  // (which backtest is open now lives in its own nav tab + the view bar)
   $('loadbanner').style.display = R.loaded_from ? 'inline-block' : 'none';
   if (R.loaded_from)
     $('loadbanner').textContent =
       `📁 Loaded saved run "${R.loaded_from}" — PnL & positions only (no candle chart stored).`;
-  const chip = t => `<span class="chip">${t}</span>`;
-  // Params are whatever the selected strategy declared — render them generically.
-  const P = R.params || {};
-  const hidden = new Set(['strategy', 'window_start', 'window_end', 'leverage', 'timeframe']);
-  const tfLabel = (P.timeframe || '1m') === '1h' ? '1-hour bars' : '1-minute bars';
-  $('meta').innerHTML =
-    (P.strategy ? chip(`<b>${P.strategy}</b>`) : '') +
-    chip(`📊 ${tfLabel}`) +
-    Object.entries(P).filter(([k]) => !hidden.has(k))
-                     .map(([k, v]) => chip(`${k.replace(/_/g, ' ')}: ${v}`)).join('') +
-    chip(`generated ${R.generated.slice(0, 19).replace('T', ' ')}`);
   renderSymbols();
   renderAccount();
   if (!selected) {
@@ -1117,113 +1304,46 @@ function applyResults() {
   }
 }
 
-let pollTimer = null;
-async function poll() {
-  const st = await (await fetch('/api/status')).json();
-  const el = $('runstatus');
-  const setStatus = (cls, txt) => {
-    el.className = txt ? 'show ' + cls : '';
-    el.textContent = txt;
-  };
-  if (st.state === 'running') {
-    $('runbtn').disabled = true;
-    let txt = 'running: ' + (st.phase || '...');
-    if (st.done != null && st.total) txt += ` ${st.done}/${st.total}`;
-    setStatus('running', txt);
-  } else {
-    $('runbtn').disabled = false;
-    clearInterval(pollTimer); pollTimer = null;
-    if (st.state === 'done') {
-      setStatus('done', `done in ${st.elapsed}s · pnl ${fmt(st.pnl)}`);
-      loadResults();
-    } else if (st.state === 'error') {
-      setStatus('error', 'error: ' + (st.error || 'unknown'));
-    } else {
-      setStatus('', '');
-    }
-  }
+/* ---- desktop notifications (browser asks permission; Electron is native) */
+function notify(title, body) {
+  try {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'granted') new Notification(title, {body});
+    else if (Notification.permission !== 'denied')
+      Notification.requestPermission().then(p => {
+        if (p === 'granted') new Notification(title, {body});
+      });
+  } catch (e) { /* headless / blocked — ignore */ }
 }
+// fire only on OBSERVED transitions (building->done etc.), never on page load
+let prevRepState = null, prevSyncState = null;
 
-/* ---- run config panel (strategy & params picker) ---- */
+/* ---- strategy registry (feeds the builder, report picker & configs) ---- */
 let CFG = null;   // /api/strategies payload
-
-function paramInput(k, v) {
-  if (typeof v === 'boolean')
-    return `<div class="cfgfield chk"><input type="checkbox" id="p_${k}" ${v ? 'checked' : ''}>
-            <label for="p_${k}">${k}</label></div>`;
-  return `<div class="cfgfield"><label for="p_${k}">${k}</label>
-          <input type="number" id="p_${k}" value="${v}" step="any"></div>`;
-}
-
-function renderParams() {
-  if (!CFG) return;
-  const name = $('cfgstrategy').value;
-  const defs = CFG.strategies[name] || {};
-  $('cfgparams').innerHTML = Object.entries(defs)
-    .map(([k, v]) => paramInput(k, v)).join('');
-}
 
 async function loadConfig() {
   try {
     CFG = await (await fetch('/api/strategies')).json();
   } catch (e) { return; }
-  $('cfgstrategy').innerHTML = Object.keys(CFG.strategies)
-    .map(n => `<option value="${n}" ${n === CFG.default ? 'selected' : ''}>${n}</option>`)
-    .join('');
-  $('cfgdays').value = CFG.days;
   const tf = CFG.timeframe || '1m';
-  if ($('cfgtf')) $('cfgtf').value = tf;
   if ($('synctf')) $('synctf').value = tf;
   if ($('reptf')) $('reptf').value = tf;
-  renderParams();
-  updateSaveLabel();
 }
 
-// Fill the panel: optionally switch strategy/timeframe, rebuild the param
-// fields, then override them with the values in P.
-function fillPanel(strategy, tf, P) {
+// Copy a saved config's values into the builder blanks (strategy, timeframe,
+// then params — ranges/lists stored in the config land as-is).
+function fillBuilder(strategy, tf, P) {
   if (!CFG) return;
-  if (strategy && CFG.strategies[strategy]) $('cfgstrategy').value = strategy;
-  if (tf && $('cfgtf')) $('cfgtf').value = tf;
-  renderParams();
-  updateSaveLabel();
-  const defs = CFG.strategies[$('cfgstrategy').value] || {};
-  for (const k of Object.keys(defs)) {
-    if (!(k in P)) continue;
-    const el = $('p_' + k);
-    if (!el) continue;
-    if (typeof defs[k] === 'boolean') el.checked = !!P[k];
-    else el.value = P[k];
+  renderJobStrats();
+  if (strategy && CFG.strategies[strategy]) $('jobstrategy').value = strategy;
+  if (tf) $('jobtf').value = tf;
+  renderJobParams();
+  for (const k of Object.keys(CFG.strategies[$('jobstrategy').value] || {})) {
+    const el = $('bp_' + k);
+    if (el && k in (P || {})) el.value = String(P[k]);
   }
+  refreshJobCfgPicker();
 }
-
-// Seed the config panel from the LAST run's params so reopening (or reloading
-// the page) shows what you actually ran, not the server defaults.
-function syncConfigToLastRun() {
-  if (!R || !R.params) return;
-  fillPanel(R.params.strategy, R.params.timeframe, R.params);
-}
-
-// When the user PICKS a strategy/timeframe, apply their saved DEFAULT config
-// for that pair (if any) on top of the tuned defaults.
-function applySavedDefault() {
-  const sc = SAVEDCFG.find(c => c.default
-    && c.strategy === $('cfgstrategy').value && c.timeframe === $('cfgtf').value);
-  if (sc) fillPanel(null, null, sc.params);
-}
-
-function updateSaveLabel() {
-  if ($('cfgsave')) $('cfgsave').textContent = '💾 Save config (' + $('cfgtf').value + ')';
-}
-$('cfgstrategy') && ($('cfgstrategy').onchange = () => { renderParams(); applySavedDefault(); });
-$('cfgtf') && ($('cfgtf').onchange = () => { updateSaveLabel(); applySavedDefault(); });
-$('cfgbtn').onclick = () => {
-  const p = $('cfgpanel');
-  p.hidden = !p.hidden;
-  $('cfgbtn').classList.toggle('open', !p.hidden);
-  if (!CFG && !p.hidden) loadConfig();
-};
-$('cfgreset').onclick = e => { e.preventDefault(); loadConfig(); };
 
 /* ---- reload strategy modules from disk (no backtest needed) ---- */
 $('reloadbtn').onclick = async () => {
@@ -1236,7 +1356,9 @@ $('reloadbtn').onclick = async () => {
       $('repstatus').textContent = 'reload failed: ' + (d.error || r.status);
     } else {
       CFG = null;
-      await loadConfig();                       // refresh picker + tuned defaults
+      await loadConfig();                       // refresh tuned defaults
+      $('jobstrategy').innerHTML = '';          // rebuild the builder
+      renderJobStrats();
       if ($('repstrats').childElementCount) {   // report panel, if it was built
         $('repstrats').innerHTML = ''; renderRepPanel();
       }
@@ -1248,33 +1370,6 @@ $('reloadbtn').onclick = async () => {
     $('repstatus').textContent = 'reload failed: ' + e;
   }
   $('reloadbtn').disabled = false;
-};
-
-function collectRunPayload() {
-  if (!CFG) return {};                      // panel never loaded -> server defaults
-  const name = $('cfgstrategy').value;
-  const defs = CFG.strategies[name] || {};
-  const params = {};
-  for (const [k, d] of Object.entries(defs)) {
-    const el = $('p_' + k);
-    if (!el) continue;
-    params[k] = (typeof d === 'boolean') ? el.checked : Number(el.value);
-  }
-  return {strategy: name, days: Number($('cfgdays').value) || undefined,
-          timeframe: $('cfgtf') ? $('cfgtf').value : '1m', params};
-}
-
-$('runbtn').onclick = async () => {
-  const r = await fetch('/api/run', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(collectRunPayload()),
-  });
-  if (r.ok || r.status === 409) {
-    $('runbtn').disabled = true;
-    if (!pollTimer) pollTimer = setInterval(poll, 2000);
-    poll();
-  }
 };
 
 /* ---- run history browser ---- */
@@ -1348,6 +1443,24 @@ async function loadHistory() {
   }
 }
 $('histrefresh').onclick = e => { e.preventDefault(); loadHistory(); };
+
+async function clearHistory(what, msg) {
+  if (!confirm(msg)) return;
+  try {
+    const r = await fetch('/api/history/clear', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({what})});
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    loadHistory(); renderLoadList(); pollJobs();
+  } catch (e) { alert('clear failed: ' + (e.message || e)); }
+}
+$('cleartests').onclick = () => clearHistory('tests',
+  'Delete ALL archived test folders (reports/test_data) AND the postgres run ' +
+  'history?\nThis cannot be undone.');
+$('clearjobs').onclick = () => clearHistory('jobs',
+  'Delete ALL finished job folders (chart data, per-symbol positions, results)?' +
+  '\nRunning/queued jobs are kept. This cannot be undone.');
 $('histfilter').oninput = renderHistory;
 $('histtbl').querySelector('thead').onclick = e => {
   const th = e.target.closest('th[data-key]');
@@ -1361,6 +1474,20 @@ $('histtbl').querySelector('thead').onclick = e => {
 let syncTimer = null;
 async function pollSync() {
   const st = await (await fetch('/api/sync/status')).json();
+  if (prevSyncState === 'syncing' && st.state === 'done') {
+    let body = st.new_bars != null
+      ? `+${st.new_bars.toLocaleString('en-US')} bars (${st.interval || '1m'}) in ${st.elapsed}s`
+      : `finished in ${st.elapsed}s`;
+    const sh = st.short_history || [];
+    if (sh.length)
+      body += `\n⚠ ${sh.length} symbol(s) have no data for the full period: ` +
+        sh.slice(0, 6).map(x => `${x[0]} (from ${x[1]})`).join(', ') +
+        (sh.length > 6 ? ` +${sh.length - 6} more` : '');
+    notify('Data sync finished ⬇', body);
+  } else if (prevSyncState === 'syncing' && st.state === 'error') {
+    notify('Data sync FAILED ❌', st.error || 'unknown error');
+  }
+  prevSyncState = st.state;
   if (st.state === 'syncing') {
     $('syncbtn').disabled = true;
     $('syncstatus').textContent = `syncing ${st.days}d…`;
@@ -1368,9 +1495,12 @@ async function pollSync() {
     $('syncbtn').disabled = false;
     clearInterval(syncTimer); syncTimer = null;
     if (st.state === 'done') {
-      $('syncstatus').textContent = st.new_bars != null
+      let txt = st.new_bars != null
         ? `synced: +${st.new_bars.toLocaleString('en-US')} bars (${st.symbols_needed}/${st.symbols_total} syms) in ${st.elapsed}s`
         : `synced in ${st.elapsed}s`;
+      if ((st.short_history || []).length)
+        txt += ` · ⚠ ${st.short_history.length} symbols listed after window start (see Latest bars)`;
+      $('syncstatus').textContent = txt;
     } else if (st.state === 'error') {
       $('syncstatus').textContent = 'sync failed: ' + (st.error || '?');
     }
@@ -1641,19 +1771,22 @@ async function renderRepTags() {
   const box = $('reptags');
   box.innerHTML = '<span class="note">loading saved runs…</span>';
   let runs = [];
-  try { runs = (await (await fetch('/api/testruns')).json()).runs || []; }
+  try { runs = (await (await fetch('/api/testruns?include_jobs=1')).json()).runs || []; }
   catch (e) { box.innerHTML = '<span class="note">could not load saved runs</span>'; return; }
   if (!runs.length) { box.innerHTML = '<span class="note">no saved runs yet</span>'; return; }
   box.innerHTML = runs.map(r => {
     const ret = r.return_pct == null ? '' : ` · ${fmt(r.return_pct, 2)}%`;
+    const badge = r.kind === 'job'
+      ? (r.has_charts ? '⚡ job · per-symbol plots' : '⚡ job')
+      : '📁 archive · equity/PnL only';
     return `<label><input type="checkbox" value="${r.tag}">
       <b>${r.strategy || '—'}</b> <span class="note">${r.timeframe || '1m'} ·
-      ${(r.generated || '').slice(0, 16).replace('T', ' ')}${ret}</span></label>`;
+      ${(r.generated || '').slice(0, 16).replace('T', ' ')}${ret} · ${badge}</span></label>`;
   }).join('');
 }
 
-document.querySelectorAll('#reppanel .modetab').forEach(tab => tab.onclick = () => {
-  document.querySelectorAll('#reppanel .modetab').forEach(t => t.classList.remove('active'));
+document.querySelectorAll('#tab-report .modetab').forEach(tab => tab.onclick = () => {
+  document.querySelectorAll('#tab-report .modetab').forEach(t => t.classList.remove('active'));
   tab.classList.add('active');
   repMode = tab.dataset.mode;
   $('repnewbox').style.display = repMode === 'new' ? 'contents' : 'none';
@@ -1666,6 +1799,11 @@ function repLink() {
 }
 async function pollReport() {
   const st = await (await fetch('/api/report/status')).json();
+  if (prevRepState === 'building' && st.state === 'done')
+    notify('Report ready 📊', `built in ${st.elapsed}s — open it from the Report button`);
+  else if (prevRepState === 'building' && st.state === 'error')
+    notify('Report FAILED ❌', st.error || 'unknown error');
+  prevRepState = st.state;
   if (st.state === 'building') {
     $('repbuild').disabled = true;
     $('repstatus').textContent = 'building report…';
@@ -1676,13 +1814,6 @@ async function pollReport() {
     else if (st.ready) repLink();
   }
 }
-$('repbtn').onclick = () => {
-  const p = $('reppanel');
-  p.hidden = !p.hidden;
-  $('repbtn').classList.toggle('open', !p.hidden);
-  const render = () => { if (!$('repstrats').childElementCount) renderRepPanel(); };
-  if (!p.hidden) (CFG ? Promise.resolve() : loadConfig()).then(render);
-};
 $('repbuild').onclick = async () => {
   const payload = collectReportPayload();
   if (repMode === 'old') {
@@ -1724,6 +1855,7 @@ async function loadSavedConfigs() {
     SAVEDCFG = (await (await fetch('/api/configs')).json()).configs || [];
   } catch (e) { SAVEDCFG = []; }
   renderConfigsTab();
+  refreshJobCfgPicker();
 }
 
 function renderConfigsTab() {
@@ -1777,30 +1909,12 @@ function renderConfigsTab() {
       const c = SAVEDCFG.find(x => x.id === el.dataset.id);
       if (!c) return;
       if (!CFG) await loadConfig();
-      fillPanel(c.strategy, c.timeframe, c.params);
-      const p = $('cfgpanel');
-      if (p.hidden) { p.hidden = false; $('cfgbtn').classList.add('open'); }
+      switchTab('backtests');
+      $('newbt').open = true;
+      fillBuilder(c.strategy, c.timeframe, c.params);
       window.scrollTo({top: 0, behavior: 'smooth'});
     });
 }
-
-$('cfgsave').onclick = async () => {
-  if (!CFG) { $('cfgsavestatus').textContent = 'open the panel first'; return; }
-  const payload = collectRunPayload();
-  const name = $('cfgsavename').value.trim();
-  $('cfgsave').disabled = true;
-  try {
-    await cfgAction({action: 'save', strategy: payload.strategy,
-                     timeframe: payload.timeframe, params: payload.params, name});
-    $('cfgsavename').value = '';
-    $('cfgsavestatus').textContent = 'saved ✓ (see Configs tab)';
-    setTimeout(() => { if ($('cfgsavestatus').textContent.startsWith('saved'))
-      $('cfgsavestatus').textContent = ''; }, 3000);
-  } catch (e) {
-    $('cfgsavestatus').textContent = 'save failed: ' + (e.message || e);
-  }
-  $('cfgsave').disabled = false;
-};
 $('cfgsrefresh').onclick = e => { e.preventDefault(); loadSavedConfigs(); };
 
 /* ---- load a saved backtest (PnL + positions from its archive folder) ---- */
@@ -1835,30 +1949,314 @@ async function loadSavedRun(tag) {
   try {
     const r = await fetch('/api/testrun/' + encodeURIComponent(tag));
     if (!r.ok) throw new Error((await r.json()).error || r.status);
-    R = await r.json();
-    selected = null;
-    applyResults();
-    $('loadpanel').hidden = true;
-    $('loadbtn').classList.remove('open');
+    const res = await r.json();
+    // archives store no chart data — open straight onto the Account subtab
+    openView('archive:' + tag, viewTitle(res), res, true, 'account');
     window.scrollTo({top: 0, behavior: 'smooth'});
   } catch (e) {
     alert('load failed: ' + (e.message || e));
   }
 }
 
-$('loadbtn').onclick = () => {
-  const p = $('loadpanel');
-  p.hidden = !p.hidden;
-  $('loadbtn').classList.toggle('open', !p.hidden);
-  if (!p.hidden) renderLoadList();
-};
 $('loadrefresh').onclick = e => { e.preventDefault(); renderLoadList(); };
-$('loadlive').onclick = e => { e.preventDefault(); selected = null; loadResults();
-  $('loadpanel').hidden = true; $('loadbtn').classList.remove('open'); };
+$('loadlive').onclick = e => { e.preventDefault(); loadResults(true); };
+
+/* ---- parallel backtest jobs (organiser) ---- */
+let JOBS = [], jobPrev = {};   // id -> last seen state (for notifications)
+
+let STAGED = [];   // pending backtests: {strategy, timeframe, days, params, count}
+
+// how many concrete backtests one raw value fans out to
+function expandCount(v) {
+  if (typeof v !== 'string') return 1;
+  const s = v.trim();
+  if (s.includes(':')) {
+    const a = s.split(':').map(Number);
+    if (a.length < 2 || a.some(isNaN)) return 1;
+    const step = a.length > 2 ? a[2] : 1;
+    if (!step) return 1;
+    return Math.max(1, Math.floor((a[1] - a[0]) / step + 1e-9) + 1);
+  }
+  if (s.includes(',')) return s.split(',').filter(x => x.trim() !== '').length || 1;
+  return 1;
+}
+const specCount = p => Object.values(p).reduce((n, v) => n * expandCount(v), 1);
+
+function renderJobParams() {
+  const defs = (CFG && CFG.strategies[$('jobstrategy').value]) || {};
+  $('jobparams').innerHTML = Object.entries(defs).map(([k, v]) =>
+    `<div class="cfgfield"><label for="bp_${k}">${k}</label>
+     <input type="text" id="bp_${k}" placeholder="${v}"
+            title="scalar, start:stop:step or a,b,c — empty = default (${v})"></div>`).join('');
+}
+
+// Saved-config picker: configs for the currently selected strategy. Picking
+// one copies its timeframe + param values into the blanks.
+function refreshJobCfgPicker() {
+  const sel = $('jobcfg');
+  if (!sel) return;
+  const strat = $('jobstrategy').value;
+  const opts = SAVEDCFG.filter(c => c.strategy === strat);
+  sel.innerHTML = '<option value="">— tuned defaults —</option>' + opts.map(c =>
+    `<option value="${escHtml(c.id)}">${escHtml(c.name)} (${c.timeframe})${c.default ? ' ★' : ''}</option>`
+  ).join('');
+}
+
+function applyJobCfg(c) {
+  if (!c) return;
+  $('jobtf').value = c.timeframe;
+  renderJobParams();                       // clear blanks first
+  for (const [k, v] of Object.entries(c.params || {})) {
+    const el = $('bp_' + k);
+    if (el) el.value = String(v);
+  }
+}
+
+function renderJobStrats() {           // builder init (name kept for call sites)
+  if (!CFG || $('jobstrategy').childElementCount) return;
+  $('jobstrategy').innerHTML = Object.keys(CFG.strategies)
+    .map(n => `<option value="${n}">${n}</option>`).join('');
+  $('jobstrategy').onchange = () => {
+    renderJobParams();
+    refreshJobCfgPicker();
+    // auto-apply the ★ default config for this strategy + current timeframe
+    const def = SAVEDCFG.find(c => c.default
+      && c.strategy === $('jobstrategy').value && c.timeframe === $('jobtf').value);
+    if (def) { applyJobCfg(def); $('jobcfg').value = def.id; }
+  };
+  $('jobcfg').onchange = () => {
+    const c = SAVEDCFG.find(x => x.id === $('jobcfg').value);
+    if (c) applyJobCfg(c);
+    else renderJobParams();                // back to tuned defaults
+  };
+  $('jobcfgsave').onclick = async () => {
+    if (!CFG) return;
+    const name = prompt('Config name (shown in the Configs tab):');
+    if (name === null) return;
+    const strat = $('jobstrategy').value;
+    const params = {};
+    for (const k of Object.keys(CFG.strategies[strat] || {})) {
+      const el = $('bp_' + k);
+      if (el && el.value.trim() !== '') params[k] = el.value.trim();
+    }
+    try {
+      await cfgAction({action: 'save', strategy: strat,
+                       timeframe: $('jobtf').value, params, name});
+      refreshJobCfgPicker();
+      $('stagehint').textContent = 'config saved ✓ (see Configs tab)';
+      setTimeout(() => { $('stagehint').textContent = ''; }, 3000);
+    } catch (e) {
+      $('stagehint').textContent = 'save failed: ' + (e.message || e);
+    }
+  };
+  renderJobParams();
+  refreshJobCfgPicker();
+}
+
+function renderStaged() {
+  const box = $('stagelist');
+  const total = STAGED.reduce((n, s) => n + s.count, 0);
+  $('stagecount').textContent = STAGED.length
+    ? `· ${STAGED.length} item${STAGED.length > 1 ? 's' : ''} → ${total} backtest${total > 1 ? 's' : ''}` : '';
+  if (!STAGED.length) {
+    box.innerHTML = '<p class="note">nothing queued — configure on the left and “＋ Add to queue”.</p>';
+    return;
+  }
+  box.innerHTML = STAGED.map((s, i) => {
+    const params = Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(' · ') || 'tuned defaults';
+    return `<div class="stageitem">
+      <span class="si-what">${s.strategy} · ${s.timeframe} · ${s.days ?? '—'}d</span>
+      <span class="si-params" title="${escHtml(params)}">${escHtml(params)}</span>
+      <span class="si-batch ${s.count > 1 ? 'batch' : 'single'}">${s.count > 1 ? 'batch ×' + s.count : 'single'}</span>
+      <span class="si-x" data-i="${i}" title="remove">✕</span>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.si-x').forEach(x =>
+    x.onclick = () => { STAGED.splice(Number(x.dataset.i), 1); renderStaged(); });
+}
+
+$('stageadd').onclick = () => {
+  if (!CFG) { $('stagehint').textContent = 'still loading strategies…'; return; }
+  const name = $('jobstrategy').value;
+  const params = {};
+  for (const k of Object.keys(CFG.strategies[name] || {})) {
+    const el = $('bp_' + k);
+    if (el && el.value.trim() !== '') params[k] = el.value.trim();
+  }
+  const spec = {strategy: name, timeframe: $('jobtf').value,
+                days: Number($('jobdays').value) || null, params,
+                count: specCount(params)};
+  STAGED.push(spec);
+  renderStaged();
+  $('stagehint').textContent = spec.count > 1
+    ? `added a batch of ${spec.count}` : 'added';
+  setTimeout(() => { $('stagehint').textContent = ''; }, 2500);
+};
+
+$('stageclear').onclick = e => { e.preventDefault(); STAGED = []; renderStaged(); };
+
+$('jobsubmit').onclick = async () => {
+  if (!STAGED.length) { $('jobstatus').textContent = 'queue is empty'; return; }
+  $('jobsubmit').disabled = true;
+  try {
+    const r = await fetch('/api/jobs', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jobs: STAGED.map(({count, ...s}) => s)})});
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    STAGED = [];
+    renderStaged();
+    $('jobstatus').textContent = `started ${d.count} backtest${d.count > 1 ? 's' : ''} ✓`;
+    setTimeout(() => { $('jobstatus').textContent = ''; }, 4000);
+    pollJobs();
+  } catch (e) {
+    $('jobstatus').textContent = 'failed: ' + (e.message || e);
+  }
+  $('jobsubmit').disabled = false;
+};
+renderStaged();
+
+async function jobAction(id, action) {
+  try {
+    const r = await fetch('/api/jobs/action', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id, action})});
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    pollJobs();
+  } catch (e) { alert('job action failed: ' + (e.message || e)); }
+}
+
+async function viewJob(id) {
+  try {
+    const r = await fetch('/api/jobs/' + encodeURIComponent(id) + '/results');
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    const res = await r.json();
+    openView(id, viewTitle(res), res);
+  } catch (e) { alert('view failed: ' + (e.message || e)); }
+}
+
+function renderJobs() {
+  const grid = $('jobgrid');
+  if (!grid) return;
+  if (!JOBS.length) {
+    grid.innerHTML = `<p class="note" style="padding:20px">no backtests yet —
+      tick strategies above and press ▶ Start backtests</p>`;
+    $('jobsummary').textContent = '';
+    return;
+  }
+  const f2 = (v, d = 2) => v == null ? '—' : fmt(v, d);
+  grid.innerHTML = JOBS.slice().reverse().map(j => {
+    const s = j.summary || {};
+    const chips = Object.entries(j.params || {})
+      .map(([k, v]) => `${k}=${v}`).join(' · ') || 'tuned defaults';
+    let mid = '';
+    if (j.state === 'running' || j.state === 'queued') {
+      const m = /(\d+)\/(\d+)/.exec(j.phase || '');
+      const pct = m ? Math.round(100 * m[1] / m[2]) : null;
+      mid = `<div class="jc-progress ${pct == null ? 'indet' : ''}">
+             <div style="width:${pct == null ? 30 : pct}%"></div></div>`;
+    } else if (j.state === 'done') {
+      mid = `<canvas class="jc-spark" data-id="${j.id}" width="300" height="46"></canvas>
+        <div class="jc-stats">
+          <span class="jc-pnl ${s.pnl >= 0 ? 'pos' : 'neg'}">${f2(s.pnl)}</span>
+          <span class="jc-stat">ret <b>${f2(s.return_pct)}%</b></span>
+          <span class="jc-stat">sharpe <b>${f2(s.sharpe_arithmetic, 2)}</b></span>
+          <span class="jc-stat">win <b>${f2(s.win_rate_pct, 1)}%</b></span>
+          <span class="jc-stat">trades <b>${s.trades_closed ?? '—'}</b></span>
+          <span class="jc-stat">maxDD <b>${f2(s.max_drawdown_pct, 1)}%</b></span>
+        </div>`;
+    } else if (j.state === 'error') {
+      mid = `<div class="jc-err">${escHtml(j.error || 'failed')}</div>`;
+    }
+    const act =
+      (j.state === 'done' ? `<button class="ghostbtn" data-act="view" data-id="${j.id}">Open →</button>` : '') +
+      (j.state === 'queued' || j.state === 'running'
+        ? `<button class="ghostbtn" data-act="cancel" data-id="${j.id}">Cancel</button>`
+        : `<button class="ghostbtn" data-act="dismiss" data-id="${j.id}" title="hide from this board (folder stays)">✕ Remove</button>
+           <button class="ghostbtn" data-act="delete" data-id="${j.id}" title="DELETE this job's folder: chart data, per-symbol positions, results">🗑 Delete</button>`);
+    return `<div class="jobcard st-${j.state}">
+      <div class="jc-head"><span class="jc-strat">${j.strategy}</span>
+        <span class="chip">${j.timeframe}</span><span class="chip">${j.days ?? '—'}d</span>
+        <span class="jc-id" title="${j.created}">${j.id.slice(-11)}</span></div>
+      <div class="jc-params" title="${escHtml(chips)}">${escHtml(chips)}</div>
+      <span class="jc-state st-${j.state}">${j.state === 'running' ? j.phase : j.state}${j.elapsed ? ' · ' + j.elapsed + 's' : ''}</span>
+      ${mid}
+      <div class="jc-actions">${act}</div>
+    </div>`;
+  }).join('');
+  grid.querySelectorAll('button[data-act]').forEach(b => b.onclick = () => {
+    if (b.dataset.act === 'view') return viewJob(b.dataset.id);
+    if (b.dataset.act === 'delete' &&
+        !confirm(`Delete job ${b.dataset.id}'s folder (chart data, positions, results)?`))
+      return;
+    jobAction(b.dataset.id, b.dataset.act);
+  });
+  // equity sparklines on finished cards
+  grid.querySelectorAll('canvas.jc-spark').forEach(cv => {
+    const j = JOBS.find(x => x.id === cv.dataset.id);
+    const vals = j && j.spark;
+    if (!vals || vals.length < 2) return;
+    const ctx = cv.getContext('2d'), w = cv.width, h = cv.height;
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    const y = v => h - 3 - (mx === mn ? h / 2 : (v - mn) / (mx - mn) * (h - 6));
+    const x = i => i / (vals.length - 1) * w;
+    const up = vals[vals.length - 1] >= vals[0];
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, up ? 'rgba(63,185,80,.20)' : 'rgba(248,81,73,.20)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath();
+    vals.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v)));
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+    ctx.strokeStyle = up ? '#3fb950' : '#f85149';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    vals.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v)));
+    ctx.stroke();
+  });
+  const n = s => JOBS.filter(j => j.state === s).length;
+  $('jobsummary').textContent =
+    `${n('running')} running · ${n('queued')} queued · ${n('done')} done` +
+    (n('error') ? ` · ${n('error')} failed` : '');
+}
+
+async function pollJobs() {
+  let d;
+  try { d = await (await fetch('/api/jobs')).json(); } catch (e) { return; }
+  JOBS = d.jobs || [];
+  // notifications on state transitions this client has observed
+  for (const j of JOBS) {
+    const prev = jobPrev[j.id];
+    if (prev && prev !== j.state) {
+      const label = `${j.strategy} ${j.timeframe} (${j.id.slice(-8)})`;
+      if (j.state === 'done') {
+        const s = j.summary || {};
+        notify('Backtest finished ✅', `${label} — pnl ${fmt(s.pnl)} · sharpe ${fmt(s.sharpe_arithmetic, 2)} · ${j.elapsed}s`);
+      } else if (j.state === 'error') {
+        notify('Backtest FAILED ❌', `${label} — ${j.error || 'unknown error'}`);
+      }
+    }
+    jobPrev[j.id] = j.state;
+  }
+  renderJobs();
+  // header chip: live jobs summary
+  const running = JOBS.filter(j => j.state === 'running').length;
+  const queued = JOBS.filter(j => j.state === 'queued').length;
+  const el = $('runstatus');
+  if (running || queued) {
+    el.className = 'show running';
+    el.textContent = `${running} running${queued ? ` · ${queued} queued` : ''}`;
+  } else if (el.classList.contains('running')) {
+    el.className = ''; el.textContent = '';
+  }
+}
+setInterval(pollJobs, 3000);
 
 // Load config + last results, then seed the panel with the last run's params.
-Promise.all([loadConfig(), loadResults()]).then(syncConfigToLastRun);
-loadSavedConfigs();   // so saved DEFAULT configs apply on strategy/tf change
+Promise.all([loadConfig(), loadResults(), loadSavedConfigs()]).then(() => {
+  renderJobStrats();          // backtests tab is the default view
+});
 fetch('/api/report/status').then(r => r.json())
   .then(st => { if (st.state === 'building') { $('repbuild').disabled = true;
                   repTimer = setInterval(pollReport, 3000); }
@@ -1868,9 +2266,7 @@ fetch('/api/sync/status').then(r => r.json())
   .then(st => { if (st.state === 'syncing') { $('syncbtn').disabled = true;
                   syncTimer = setInterval(pollSync, 3000); } })
   .catch(() => {});
-poll().then(() => {  // resume polling if a run is already in progress
-  if ($('runbtn').disabled && !pollTimer) pollTimer = setInterval(poll, 2000);
-});
+pollJobs();          // populate the organiser immediately
 </script>
 </body>
 </html>

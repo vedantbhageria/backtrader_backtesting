@@ -61,5 +61,5 @@ if %errorlevel%==0 (
 ) else (
     echo [launch] starting dashboard at http://localhost:8001
     start "" http://localhost:8001
-    python server.py
+    python backend\server.py
 )

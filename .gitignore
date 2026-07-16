@@ -1,0 +1,8 @@
+
+# electron build artifacts
+electron/node_modules/
+electron/dist/
+
+# generated artifacts (backtest outputs, archived runs, built reports)
+reports/
+report_out/

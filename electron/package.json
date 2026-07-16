@@ -1,0 +1,37 @@
+{
+  "name": "backtrader-dashboard",
+  "productName": "Backtrader Dashboard",
+  "version": "1.0.0",
+  "description": "Desktop wrapper for the backtrader backtesting dashboard (starts backend/server.py and opens it; native notifications for runs, reports and data syncs).",
+  "main": "main.js",
+  "author": "vedantbhageria",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.backtrader.dashboard",
+    "productName": "Backtrader Dashboard",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "BacktraderDashboard.exe"
+    }
+  }
+}

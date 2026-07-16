@@ -1,0 +1,1027 @@
+
+import asyncio
+import importlib
+import json
+from collections import deque
+from datetime import datetime, timezone
+import os
+import shutil
+import sys
+import threading
+
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+import _paths                      # noqa: F401  (sys.path: ROOT/backend/strategies)
+import db
+import strategy_base
+import EMACrossShortTest
+import KalmanFilter
+import ExtendedKalmanFilter
+import AccelerationKalmanFilter
+import EMAlgoTest
+import EMAlgoNonLinTest
+import run_backtest
+
+BASE = _paths.ROOT                 # data/artifacts live at project root
+REPORTS = os.path.join(BASE, 'reports')
+os.makedirs(REPORTS, exist_ok=True)
+
+# ---- server log ring buffer -------------------------------------------------
+# Everything printed by the server and its worker threads (backtests, sync,
+# report builds) is teed into this buffer and served at /api/logs so the
+# dashboard's log window can show it (warnings about excluded symbols, run
+# tracebacks, etc.) without shell access.
+_LOG_BUF: deque = deque(maxlen=4000)     # (id, 'HH:MM:SS', line)
+_log_lock = threading.Lock()
+_log_seq = 0
+# access-log lines from the dashboard's own polling would flood the window
+# (the log poll would log itself every 2s) — drop them at capture time
+_LOG_SKIP = ('/api/logs', '/api/status', '/api/sync/status',
+             '/api/report/status', '/api/results')
+
+
+class _LogTee:
+    """File-like wrapper: pass writes through and collect complete lines."""
+    def __init__(self, orig):
+        self._orig = orig
+        self._part = ''
+
+    def write(self, s):
+        try:
+            self._orig.write(s)
+        except Exception:
+            pass
+        global _log_seq
+        with _log_lock:
+            self._part += s
+            while '\n' in self._part:
+                line, self._part = self._part.split('\n', 1)
+                if line.strip() and not any(p in line for p in _LOG_SKIP):
+                    _log_seq += 1
+                    _LOG_BUF.append((_log_seq,
+                                     datetime.now().strftime('%H:%M:%S'),
+                                     line.rstrip()))
+
+    def flush(self):
+        try:
+            self._orig.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        return False
+
+
+sys.stdout = _LogTee(sys.stdout)
+sys.stderr = _LogTee(sys.stderr)
+
+app = FastAPI(title='Backtrader Dashboard')
+app.mount('/reports', StaticFiles(directory=REPORTS), name='reports')
+# Vendored JS (lightweight-charts) so the dashboard needs no internet/CDN.
+app.mount('/vendor', StaticFiles(directory=os.path.join(BASE, 'vendor')),
+          name='vendor')
+# KF/EKF/EM comparison report (build_report.py output) on the same server.
+REPORT_OUT = os.path.join(BASE, 'report_out')
+os.makedirs(REPORT_OUT, exist_ok=True)
+app.mount('/report', StaticFiles(directory=REPORT_OUT, html=True), name='report')
+
+_run_thread: threading.Thread | None = None
+_report_thread: threading.Thread | None = None
+_report_state: dict = {'state': 'idle'}
+_sync_thread: threading.Thread | None = None
+_sync_state: dict = {'state': 'idle'}
+_console_proc = None                    # persistent console_worker.py subprocess
+_console_lock = threading.Lock()
+
+
+def _read_json(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+@app.get('/')
+def index():
+    return FileResponse(os.path.join(BASE, 'dashboard.html'))
+
+
+@app.get('/api/results')
+def results():
+    # Prefer the most recently finished (non-dismissed) job; fall back to the
+    # legacy single-run results file.
+    with _jobs_lock:
+        done = [m for m in _jobs.values()
+                if m['state'] == 'done' and not m.get('dismissed')]
+    if done:
+        jid = max(done, key=lambda m: m.get('started') or m['created'])['id']
+        res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+        if res is not None:
+            res['chartbase'] = '/reports/jobs/%s/chartdata' % jid
+            res['job_id'] = jid
+            return res
+    data = _read_json(run_backtest.RESULTS_PATH)
+    if data is None:
+        return JSONResponse({'error': 'no results yet — run a backtest'},
+                            status_code=404)
+    return data
+
+
+@app.get('/api/status')
+def status():
+    running = _run_thread is not None and _run_thread.is_alive()
+    data = _read_json(run_backtest.STATUS_PATH) or {'state': 'idle'}
+    # If the runner crashed hard before writing an error status, don't report
+    # a stale 'running' state forever.
+    if data.get('state') == 'running' and not running:
+        data['state'] = 'error'
+        data.setdefault('error', 'runner stopped unexpectedly')
+    data['thread_alive'] = running
+    return data
+
+
+@app.get('/api/strategies')
+def strategies():
+    """Strategy picker data: every registered strategy with its tuned default
+    params, plus the module default selection and backtest days."""
+    return {
+        'default': run_backtest.STRATEGY.__name__,
+        'days': run_backtest.BACKTEST_DAYS,
+        'timeframe': '1m',
+        'timeframes': ['1m', '1h'],
+        'strategies': {name: params
+                       for name, (_cls, params) in run_backtest.STRATEGIES.items()},
+    }
+
+
+@app.post('/api/run')
+async def run(request: Request):
+    global run_backtest
+    if _run_thread is not None and _run_thread.is_alive():
+        return JSONResponse({'error': 'backtest already running'},
+                            status_code=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    err = _reload_modules()
+    if err:
+        return JSONResponse({'error': err}, status_code=500)
+    return _start_run(payload)
+
+
+def _reload_modules():
+    """Reload every project module from disk so code/param edits (including the
+    STRATEGIES registry defaults) take effect without restarting the server.
+    Order is dependency-first: base classes and leaf strategy modules before
+    run_backtest (which does `from <module> import <Strategy>`); reloading it
+    first would capture a stale class, then reloading the strategy module in
+    place rebinds that class's globals — mixing old methods with new functions.
+    Returns None on success or an error string."""
+    global db, strategy_base, EMACrossShortTest, KalmanFilter, EMAlgoTest, EMAlgoNonLinTest, run_backtest
+    global ExtendedKalmanFilter, AccelerationKalmanFilter
+    try:
+        db = importlib.reload(db)
+        strategy_base = importlib.reload(strategy_base)
+        EMACrossShortTest = importlib.reload(EMACrossShortTest)
+        KalmanFilter = importlib.reload(KalmanFilter)
+        EMAlgoTest = importlib.reload(EMAlgoTest)
+        EMAlgoNonLinTest = importlib.reload(EMAlgoNonLinTest)
+        ExtendedKalmanFilter = importlib.reload(ExtendedKalmanFilter)
+        AccelerationKalmanFilter = importlib.reload(AccelerationKalmanFilter)
+        run_backtest = importlib.reload(run_backtest)
+    except Exception as e:
+        return 'reload failed: %s' % e
+    return None
+
+
+@app.post('/api/reload')
+def reload_modules():
+    """Reload strategy modules + run_backtest so edits to code or the STRATEGIES
+    registry (default params like EMNonLinTest's `dead`) appear in the picker
+    without having to run a backtest first."""
+    if _run_thread is not None and _run_thread.is_alive():
+        return JSONResponse({'error': 'cannot reload while a backtest is running'},
+                            status_code=409)
+    err = _reload_modules()
+    if err:
+        return JSONResponse({'error': err}, status_code=500)
+    return {'reloaded': True, 'strategies': list(run_backtest.STRATEGIES.keys())}
+
+
+def _start_run(payload=None):
+    global _run_thread
+    payload = payload or {}
+    kwargs = {'strategy': payload.get('strategy'),
+              'params': payload.get('params'),
+              'days': payload.get('days'),
+              'timeframe': payload.get('timeframe')}
+    _run_thread = threading.Thread(target=run_backtest.run, kwargs=kwargs,
+                                   daemon=True)
+    _run_thread.start()
+    return {'started': True}
+
+
+@app.post('/api/report')
+async def build_comparison_report(request: Request):
+    """Rebuild the KF/EKF/EM plotly comparison (build_report.py) in a thread;
+    the result is served from /report/. Poll /api/report/status."""
+    global _report_thread
+    if _report_thread is not None and _report_thread.is_alive():
+        return JSONResponse({'error': 'report already building'}, status_code=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    symbol = payload.get('symbol') or None
+    # [{'name': <registry name>, 'params': {...}}, ...]; None -> report default
+    selections = payload.get('strategies') or None
+    if selections is not None and not isinstance(selections, list):
+        selections = None
+    # 'compare old tests' mode: list of archived run tags to compare instead
+    tags = payload.get('tags') or None
+    if tags is not None and not isinstance(tags, list):
+        tags = None
+    timeframe = payload.get('timeframe') if payload.get('timeframe') in ('1m', '1h') else '1m'
+    try:
+        days = int(payload.get('days') or 0) or None   # None -> full history
+    except (TypeError, ValueError):
+        days = None
+
+    def _work():
+        import time as _time
+        _report_state.update(state='building', started=_time.time(), error=None)
+        try:
+            import build_report
+            build_report = importlib.reload(build_report)
+            if tags:
+                build_report.build_from_folders(tags)
+            else:
+                # symbol=None/'' -> portfolio report over ALL symbols
+                build_report.build(symbol, selections=selections,
+                                   timeframe=timeframe, days=days)
+            _report_state.update(state='done',
+                                 elapsed=round(_time.time() - _report_state['started'], 1))
+        except Exception as e:
+            _report_state.update(state='error', error=str(e))
+
+    _report_thread = threading.Thread(target=_work, daemon=True)
+    _report_thread.start()
+    return {'started': True}
+
+
+@app.get('/api/report/status')
+def report_status():
+    st = dict(_report_state)
+    st['thread_alive'] = _report_thread is not None and _report_thread.is_alive()
+    if st.get('state') == 'building' and not st['thread_alive']:
+        st['state'] = 'error'
+        st.setdefault('error', 'report thread stopped unexpectedly')
+    st['ready'] = os.path.exists(os.path.join(REPORT_OUT, 'index.html'))
+    return st
+
+
+def _console_localonly(request):
+    """The console executes arbitrary Python — never serve it off-box. If the
+    server is ever bound to 0.0.0.0 (e.g. to share the report), this endpoint
+    stays localhost-only."""
+    host = getattr(request.client, 'host', '')
+    return host in ('127.0.0.1', '::1', 'localhost')
+
+
+def _console_start():
+    global _console_proc
+    import subprocess
+    _console_proc = subprocess.Popen(
+        [sys.executable, os.path.join(_paths.BACKEND, 'console_worker.py')],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        text=True, encoding='utf-8', cwd=BASE)
+    banner = json.loads(_console_proc.stdout.readline())
+    return banner
+
+
+@app.post('/api/console')
+async def console_exec(request: Request):
+    """Run Python in the persistent console worker. Body: {"code": "..."}.
+    Blocks until the code finishes (notebook semantics); use /api/console/restart
+    to kill a runaway command."""
+    if not _console_localonly(request):
+        return JSONResponse({'error': 'console is localhost-only'}, status_code=403)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    code = (payload or {}).get('code', '')
+    if not isinstance(code, str) or not code.strip():
+        return {'out': '', 'err': None}
+    def _exchange():
+        global _console_proc
+        with _console_lock:
+            if _console_proc is None or _console_proc.poll() is not None:
+                banner = _console_start()
+                prefix = banner.get('out', '') + '\n'
+            else:
+                prefix = ''
+            _console_proc.stdin.write(json.dumps({'code': code}) + '\n')
+            _console_proc.stdin.flush()
+            reply = json.loads(_console_proc.stdout.readline())
+        reply['out'] = prefix + reply.get('out', '')
+        return reply
+
+    try:
+        # off the event loop: a long-running command must not freeze the app
+        return await asyncio.to_thread(_exchange)
+    except Exception as e:
+        return JSONResponse({'error': 'console worker failed: %s' % e},
+                            status_code=500)
+
+
+@app.post('/api/console/restart')
+async def console_restart(request: Request):
+    """Kill the worker (unsticks runaway code, clears all variables)."""
+    if not _console_localonly(request):
+        return JSONResponse({'error': 'console is localhost-only'}, status_code=403)
+    def _do_restart():
+        global _console_proc
+        with _console_lock:
+            if _console_proc is not None and _console_proc.poll() is None:
+                _console_proc.kill()
+            _console_proc = None
+            return _console_start()
+
+    try:
+        banner = await asyncio.to_thread(_do_restart)
+    except Exception as e:
+        return JSONResponse({'error': 'restart failed: %s' % e}, status_code=500)
+    return {'restarted': True, 'out': banner.get('out', '')}
+
+
+def _read_positions_by_symbol(run_dir):
+    """Group a run's archived position_log.csv by symbol (the full detail the
+    Positions table shows). Empty dict if the file is missing."""
+    import csv as _csv
+    path = os.path.join(run_dir, 'position_log.csv')
+    out = {}
+    if not os.path.exists(path):
+        return out
+    numeric = {'entry_price', 'exit_price', 'size', 'pnl', 'pnlcomm'}
+    with open(path, newline='', encoding='utf-8') as f:
+        for row in _csv.DictReader(f):
+            d = {}
+            for k, v in row.items():
+                if k in numeric and v not in (None, ''):
+                    try:
+                        d[k] = float(v)
+                    except ValueError:
+                        d[k] = v
+                elif k == 'bars_held' and v not in (None, ''):
+                    try:
+                        d[k] = int(float(v))
+                    except ValueError:
+                        d[k] = v
+                else:
+                    d[k] = v
+            out.setdefault(row.get('symbol', '?'), []).append(d)
+    return out
+
+
+@app.get('/api/testruns')
+def list_test_runs(include_jobs: int = 0):
+    """Archived backtest folders (reports/test_data/<tag>/) that carry a
+    run.json snapshot — the ones the dashboard can reload / the report can
+    compare. Newest first. include_jobs=1 prepends finished JOBS (tag
+    'job:<id>') whose folders still exist — those carry chart data, so the
+    comparison report can draw per-symbol prediction plots for them."""
+    out = []
+    if include_jobs:
+        with _jobs_lock:
+            done = [m for m in _jobs.values() if m['state'] == 'done']
+        for m in sorted(done, key=lambda x: x['created'], reverse=True):
+            if not os.path.isfile(os.path.join(JOBS_DIR, m['id'], 'results.json')):
+                continue
+            s = m.get('summary') or {}
+            out.append({'tag': 'job:' + m['id'], 'kind': 'job',
+                        'generated': m.get('created'),
+                        'strategy': m['strategy'], 'timeframe': m['timeframe'],
+                        'pnl': s.get('pnl'), 'return_pct': s.get('return_pct'),
+                        'trades': s.get('trades_closed'), 'symbols': None,
+                        'has_charts': os.path.isdir(os.path.join(JOBS_DIR, m['id'], 'chartdata'))})
+    tdir = run_backtest.TEST_DATA_DIR
+    if os.path.isdir(tdir):
+        for tag in sorted(os.listdir(tdir), reverse=True):
+            snap = _read_json(os.path.join(tdir, tag, 'run.json'))
+            if not snap:
+                continue
+            p, s = snap.get('params', {}), snap.get('summary', {})
+            out.append({'tag': tag, 'kind': 'archive', 'generated': snap.get('generated'),
+                        'strategy': p.get('strategy'), 'timeframe': p.get('timeframe', '1m'),
+                        'pnl': s.get('pnl'), 'return_pct': s.get('return_pct'),
+                        'trades': s.get('trades_closed'), 'symbols': s.get('symbols'),
+                        'window_start': p.get('window_start'), 'window_end': p.get('window_end')})
+    return {'runs': out}
+
+
+@app.get('/api/testrun/{tag}')
+def load_test_run(tag: str):
+    """Load one archived run for the dashboard: its run.json snapshot plus the
+    per-symbol positions from position_log.csv. No candle/indicator chart data
+    (not stored) — the UI shows PnL + positions only for loaded runs."""
+    if not tag.replace('-', '').isalnum():           # tag is a timestamp folder
+        return JSONResponse({'error': 'bad tag'}, status_code=400)
+    run_dir = os.path.join(run_backtest.TEST_DATA_DIR, tag)
+    snap = _read_json(os.path.join(run_dir, 'run.json'))
+    if not snap:
+        return JSONResponse({'error': 'no such archived run (needs run.json)'},
+                            status_code=404)
+    pos = _read_positions_by_symbol(run_dir)
+    snap['charts'] = []                              # no candles for loaded runs
+    snap['positionsBySymbol'] = pos
+    snap['loaded_from'] = tag
+    return snap
+
+
+# generated-timestamp -> folder caches (run.json / results.json are immutable,
+# so cache entries never go stale; missing folders just drop out of the map)
+_gen2archive: dict = {}   # archive tag -> generated
+_gen2job: dict = {}       # job id -> generated
+
+
+def _folder_links():
+    """{generated: {'archive_tag':…}} ∪ {generated: {'job_id':…}} so history
+    rows (postgres) can be tied back to their artifact folders."""
+    links = {}
+    tdir = run_backtest.TEST_DATA_DIR
+    for tag in (os.listdir(tdir) if os.path.isdir(tdir) else []):
+        if tag not in _gen2archive:
+            snap = _read_json(os.path.join(tdir, tag, 'run.json'))
+            _gen2archive[tag] = (snap or {}).get('generated')
+        g = _gen2archive[tag]
+        if g and os.path.isdir(os.path.join(tdir, tag)):
+            links.setdefault(g, {})['archive_tag'] = tag
+    with _jobs_lock:
+        done = [m['id'] for m in _jobs.values() if m['state'] == 'done']
+    for jid in done:
+        if jid not in _gen2job:
+            res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+            _gen2job[jid] = (res or {}).get('generated')
+        g = _gen2job[jid]
+        if g and os.path.isfile(os.path.join(JOBS_DIR, jid, 'results.json')):
+            links.setdefault(g, {})['job_id'] = jid
+    return links
+
+
+@app.get('/api/runs')
+def runs_history(limit: int = 500):
+    """Past backtest runs from Postgres (falls back cleanly when DB is down),
+    enriched with links to their artifact folders: `job_id` (chart data,
+    per-symbol positions) and `archive_tag` (test_data: position log, xlsx)."""
+    try:
+        import db
+        conn = db.get_conn()
+        out = db.list_runs(conn, limit=max(1, min(int(limit), 5000)))
+        conn.close()
+    except Exception as e:
+        return JSONResponse({'error': 'database unavailable: %s' % e},
+                            status_code=503)
+    links = _folder_links()
+    for r in out:
+        r.update(links.get(r.get('generated'), {}))
+    return {'runs': out}
+
+
+@app.post('/api/testdata/delete')
+async def delete_testdata(request: Request):
+    """Delete ONE archived run folder (reports/test_data/<tag>)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    tag = str(payload.get('tag') or '')
+    if not tag or not all(c.isalnum() or c in '-_' for c in tag):
+        return JSONResponse({'error': 'bad tag'}, status_code=400)
+    p = os.path.join(run_backtest.TEST_DATA_DIR, tag)
+    if not os.path.isdir(p):
+        return JSONResponse({'error': 'no such archive'}, status_code=404)
+    shutil.rmtree(p, ignore_errors=True)
+    return {'ok': True}
+
+
+@app.post('/api/sync')
+async def sync_data(request: Request):
+    """Incremental market-data sync — the exact routine launch.bat runs
+    (fetch_binance_csv.main): asks postgres what's missing over the last N
+    days, downloads only the gaps, upserts. Poll /api/sync/status."""
+    global _sync_thread
+    if _sync_thread is not None and _sync_thread.is_alive():
+        return JSONResponse({'error': 'sync already running'}, status_code=409)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    try:
+        days = max(1, min(int((payload or {}).get('days', 180)), 2000))
+    except (TypeError, ValueError):
+        days = 180
+    interval = (payload or {}).get('interval')
+    interval = interval if interval in ('1m', '1h') else '1m'
+
+    def _work():
+        import time as _time
+        _sync_state.update(state='syncing', days=days, interval=interval,
+                           started=_time.time(), error=None)
+        try:
+            import fetch_binance_csv
+            fetch_binance_csv = importlib.reload(fetch_binance_csv)
+            stats = fetch_binance_csv.main(days, interval) or {}
+            _sync_state.update(state='done', **stats)
+        except Exception as e:
+            _sync_state.update(state='error', error=str(e))
+
+    _sync_thread = threading.Thread(target=_work, daemon=True)
+    _sync_thread.start()
+    return {'started': True, 'days': days}
+
+
+@app.get('/api/sync/status')
+def sync_status():
+    st = dict(_sync_state)
+    st['thread_alive'] = _sync_thread is not None and _sync_thread.is_alive()
+    if st.get('state') == 'syncing' and not st['thread_alive']:
+        st['state'] = 'error'
+        st.setdefault('error', 'sync thread stopped unexpectedly')
+    return st
+
+
+# ---- saved per-strategy / per-timeframe parameter configs ----------------
+CONFIG_STORE = os.path.join(BASE, 'saved_configs.json')
+_config_lock = threading.Lock()
+
+
+def _load_configs():
+    try:
+        with open(CONFIG_STORE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _write_configs(items):
+    with open(CONFIG_STORE, 'w', encoding='utf-8') as f:
+        json.dump(items, f, indent=1)
+
+
+@app.get('/api/configs')
+def list_configs():
+    """All saved configs: [{id, strategy, timeframe, name, params, notes,
+    default, saved}]. `default` is per (strategy, timeframe)."""
+    with _config_lock:
+        return {'configs': _load_configs()}
+
+
+@app.post('/api/configs')
+async def modify_configs(request: Request):
+    """action=save {strategy,timeframe,name,params,notes} | default {id} |
+    notes {id,notes} | delete {id}."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    action = payload.get('action')
+    with _config_lock:
+        items = _load_configs()
+        if action == 'save':
+            strategy = str(payload.get('strategy') or '')
+            timeframe = payload.get('timeframe') if payload.get('timeframe') in ('1m', '1h') else '1m'
+            params = payload.get('params')
+            if not strategy or not isinstance(params, dict):
+                return JSONResponse({'error': 'strategy and params required'}, status_code=400)
+            cid = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-') + strategy
+            first_for_pair = not any(c['strategy'] == strategy and c['timeframe'] == timeframe
+                                     for c in items)
+            items.append({'id': cid, 'strategy': strategy, 'timeframe': timeframe,
+                          'name': str(payload.get('name') or '')[:80] or cid,
+                          'params': params,
+                          'notes': str(payload.get('notes') or '')[:2000],
+                          'default': first_for_pair,   # first save = default
+                          'saved': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+        elif action == 'default':
+            cid = payload.get('id')
+            hit = next((c for c in items if c['id'] == cid), None)
+            if hit is None:
+                return JSONResponse({'error': 'unknown config id'}, status_code=404)
+            for c in items:
+                if c['strategy'] == hit['strategy'] and c['timeframe'] == hit['timeframe']:
+                    c['default'] = (c['id'] == cid)
+        elif action == 'notes':
+            hit = next((c for c in items if c['id'] == payload.get('id')), None)
+            if hit is None:
+                return JSONResponse({'error': 'unknown config id'}, status_code=404)
+            hit['notes'] = str(payload.get('notes') or '')[:2000]
+        elif action == 'delete':
+            items = [c for c in items if c['id'] != payload.get('id')]
+        else:
+            return JSONResponse({'error': 'unknown action'}, status_code=400)
+        _write_configs(items)
+        return {'ok': True, 'configs': items}
+
+
+# ---- parallel backtest jobs ------------------------------------------------
+# Each job runs in its OWN process (backend/job_runner.py) writing artifacts
+# to reports/jobs/<id>/. The manager thread starts queued jobs up to
+# MAX_PARALLEL_JOBS, mirrors their status files into _jobs, and persists the
+# registry so the list survives server restarts.
+import itertools
+import subprocess
+import time as _t
+
+JOBS_DIR = os.path.join(REPORTS, 'jobs')
+JOBS_INDEX = os.path.join(JOBS_DIR, 'index.json')
+MAX_PARALLEL_JOBS = int(os.getenv('MAX_PARALLEL_JOBS', '2'))
+MAX_JOBS_PER_SUBMIT = 64
+
+_jobs: dict = {}          # id -> meta dict
+_job_procs: dict = {}     # id -> subprocess.Popen
+_jobs_lock = threading.Lock()
+_job_seq = 0
+
+
+def _jobs_save():
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    with open(JOBS_INDEX, 'w', encoding='utf-8') as f:
+        json.dump(list(_jobs.values()), f, indent=1)
+
+
+def _jobs_load():
+    try:
+        with open(JOBS_INDEX, encoding='utf-8') as f:
+            for m in json.load(f):
+                if m.get('state') in ('queued', 'running'):
+                    m['state'] = 'error'
+                    m['error'] = 'server restarted mid-job'
+                _jobs[m['id']] = m
+    except (OSError, ValueError):
+        pass
+
+
+def _expand_value(v):
+    """One param value -> list of values. Strings may be 'start:stop:step'
+    (inclusive) or 'a,b,c'; anything else is a scalar."""
+    if not isinstance(v, str):
+        return [v]
+    s = v.strip()
+    if not s:
+        return [None]                     # empty -> use the strategy default
+    if ':' in s:
+        try:
+            nums = [float(p) for p in s.split(':')]
+        except ValueError:
+            return [s]
+        start, stop = nums[0], nums[1]
+        step = nums[2] if len(nums) > 2 else 1.0
+        if step == 0:
+            return [start]
+        out, x = [], start
+        for _ in range(500):
+            if (step > 0 and x > stop + 1e-9) or (step < 0 and x < stop - 1e-9):
+                break
+            out.append(int(x) if float(x).is_integer() else round(x, 10))
+            x += step
+        return out or [start]
+    if ',' in s:
+        out = []
+        for p in (q.strip() for q in s.split(',')):
+            if not p:
+                continue
+            try:
+                f = float(p)
+                out.append(int(f) if f.is_integer() else f)
+            except ValueError:
+                out.append(True if p.lower() == 'true'
+                           else False if p.lower() == 'false' else p)
+        return out or [None]
+    try:
+        f = float(s)
+        return [int(f) if f.is_integer() else f]
+    except ValueError:
+        return [True if s.lower() == 'true'
+                else False if s.lower() == 'false' else s]
+
+
+def _expand_spec(spec):
+    """One submission entry -> list of concrete param dicts (cartesian product
+    over every ranged param)."""
+    params = spec.get('params') or {}
+    keys, valsets = [], []
+    for k, v in params.items():
+        vals = [x for x in _expand_value(v)]
+        keys.append(k)
+        valsets.append(vals)
+    out = []
+    for combo in itertools.product(*valsets) if keys else [()]:
+        p = {k: v for k, v in zip(keys, combo) if v is not None}
+        out.append(p)
+    return out
+
+
+def _new_job(strategy, timeframe, days, params):
+    global _job_seq
+    _job_seq += 1
+    jid = 'j%s-%02d' % (datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S'), _job_seq % 100)
+    jdir = os.path.join(JOBS_DIR, jid)
+    os.makedirs(os.path.join(jdir, 'chartdata'), exist_ok=True)
+    job = {'strategy': strategy, 'timeframe': timeframe, 'days': days,
+           'params': params}
+    with open(os.path.join(jdir, 'job.json'), 'w', encoding='utf-8') as f:
+        json.dump(job, f)
+    meta = dict(job, id=jid, state='queued', phase='queued', dismissed=False,
+                created=datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                summary=None, error=None, elapsed=None)
+    _jobs[jid] = meta
+    return meta
+
+
+def _spawn_job(meta):
+    jid = meta['id']
+    jdir = os.path.join(JOBS_DIR, jid)
+    env = dict(os.environ, JOB_SKIP_REFRESH='1')
+    proc = subprocess.Popen(
+        [sys.executable, os.path.join(_paths.BACKEND, 'job_runner.py'), jdir],
+        cwd=_paths.ROOT, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _job_procs[jid] = proc
+    meta.update(state='running', phase='starting',
+                started=datetime.now(timezone.utc).isoformat(timespec='seconds'))
+
+
+def _refresh_csvs_for(timeframe):
+    """Serialize CSV-cache refreshes in the parent; skip when a sibling job of
+    the same timeframe is mid-run (its feeds must not be rewritten). The cache
+    window is the WIDEST window any pending/running job of this timeframe
+    needs — not the whole history."""
+    if any(m['state'] == 'running' and m['timeframe'] == timeframe
+           for m in _jobs.values()):
+        return
+    days = [m.get('days') or run_backtest.BACKTEST_DAYS
+            for m in _jobs.values()
+            if m['timeframe'] == timeframe and m['state'] in ('queued', 'running')]
+    from datetime import timedelta
+    need_start = (datetime.now(timezone.utc)
+                  - timedelta(days=(max(days) if days else run_backtest.BACKTEST_DAYS) + 2))
+    try:
+        conn = db.get_conn()
+        try:
+            run_backtest._refresh_full_csvs(conn, timeframe, need_start=need_start)
+        finally:
+            conn.close()
+    except Exception as e:
+        print('[jobs] csv refresh failed (%s) — jobs will use existing CSVs' % e)
+
+
+def _jobs_tick():
+    with _jobs_lock:
+        changed = False
+        # reap running jobs
+        for jid, proc in list(_job_procs.items()):
+            meta = _jobs.get(jid)
+            if meta is None:
+                proc.kill(); _job_procs.pop(jid, None); continue
+            st = _read_json(os.path.join(JOBS_DIR, jid, 'status.json')) or {}
+            phase = st.get('phase') or st.get('state') or meta['phase']
+            prog = ''
+            if st.get('done') is not None and st.get('total'):
+                prog = ' %s/%s' % (st['done'], st['total'])
+            newphase = str(phase) + prog
+            if newphase != meta['phase']:
+                meta['phase'] = newphase; changed = True
+            if proc.poll() is not None:                    # process ended
+                _job_procs.pop(jid, None)
+                res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+                if st.get('state') == 'done' and res:
+                    # ~60-point equity sparkline for the job card
+                    eq = [v for _dt, v in (res.get('equity') or [])]
+                    step = max(1, len(eq) // 60)
+                    meta.update(state='done', phase='done',
+                                elapsed=st.get('elapsed'),
+                                spark=[round(v, 2) for v in eq[::step]][:60],
+                                summary={k: res.get('summary', {}).get(k) for k in
+                                         ('pnl', 'return_pct', 'trades_closed',
+                                          'win_rate_pct', 'sharpe_arithmetic',
+                                          'max_drawdown_pct')})
+                else:
+                    meta.update(state='error', phase='error',
+                                error=st.get('error') or 'process exited unexpectedly')
+                changed = True
+        # start queued jobs up to the parallel limit
+        running = sum(1 for m in _jobs.values() if m['state'] == 'running')
+        for meta in [m for m in _jobs.values() if m['state'] == 'queued']:
+            if running >= MAX_PARALLEL_JOBS:
+                break
+            _refresh_csvs_for(meta['timeframe'])
+            _spawn_job(meta)
+            running += 1; changed = True
+        if changed:
+            _jobs_save()
+
+
+def _jobs_manager():
+    while True:
+        try:
+            _jobs_tick()
+        except Exception as e:
+            print('[jobs] manager error: %s' % e)
+        _t.sleep(1.0)
+
+
+_jobs_load()
+threading.Thread(target=_jobs_manager, daemon=True).start()
+
+
+@app.get('/api/jobs')
+def list_jobs():
+    with _jobs_lock:
+        return {'jobs': [m for m in _jobs.values() if not m.get('dismissed')],
+                'max_parallel': MAX_PARALLEL_JOBS}
+
+
+@app.post('/api/jobs')
+async def submit_jobs(request: Request):
+    """{jobs: [{strategy, timeframe, days, params}...]}. Param values may be
+    scalars, 'start:stop:step' ranges or 'a,b,c' lists — every combination
+    becomes its own job (cartesian per entry, capped)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    specs = payload.get('jobs') or []
+    if not isinstance(specs, list) or not specs:
+        return JSONResponse({'error': 'no jobs given'}, status_code=400)
+    expanded = []
+    for spec in specs:
+        name = spec.get('strategy')
+        if name not in run_backtest.STRATEGIES:
+            return JSONResponse({'error': 'unknown strategy %r' % name}, status_code=400)
+        tf = spec.get('timeframe') if spec.get('timeframe') in ('1m', '1h') else '1m'
+        try:
+            days = int(spec.get('days') or 0) or None
+        except (TypeError, ValueError):
+            days = None
+        for params in _expand_spec(spec):
+            expanded.append((name, tf, days, params))
+    if len(expanded) > MAX_JOBS_PER_SUBMIT:
+        return JSONResponse({'error': 'that expands to %d jobs (cap %d) — narrow the ranges'
+                             % (len(expanded), MAX_JOBS_PER_SUBMIT)}, status_code=400)
+    with _jobs_lock:
+        created = [_new_job(*e)['id'] for e in expanded]
+        _jobs_save()
+    return {'created': created, 'count': len(created)}
+
+
+@app.post('/api/jobs/action')
+async def job_action(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    jid, action = payload.get('id'), payload.get('action')
+    with _jobs_lock:
+        meta = _jobs.get(jid)
+        if meta is None:
+            return JSONResponse({'error': 'unknown job'}, status_code=404)
+        if action == 'cancel':
+            proc = _job_procs.pop(jid, None)
+            if proc is not None:
+                proc.kill()
+            if meta['state'] in ('queued', 'running'):
+                meta.update(state='cancelled', phase='cancelled')
+        elif action == 'dismiss':
+            if meta['state'] in ('queued', 'running'):
+                return JSONResponse({'error': 'cancel it first'}, status_code=400)
+            meta['dismissed'] = True
+        elif action == 'delete':
+            # remove the job's FOLDER (chartdata, per-symbol positions, results)
+            # and its registry entry — gone for good, unlike dismiss.
+            if meta['state'] in ('queued', 'running'):
+                return JSONResponse({'error': 'cancel it first'}, status_code=400)
+            shutil.rmtree(os.path.join(JOBS_DIR, jid), ignore_errors=True)
+            _jobs.pop(jid, None)
+        else:
+            return JSONResponse({'error': 'unknown action'}, status_code=400)
+        _jobs_save()
+    return {'ok': True}
+
+
+@app.post('/api/history/clear')
+async def clear_history(request: Request):
+    """what='tests': wipe reports/test_data archives + the postgres run
+    history. what='jobs': delete every finished job folder + registry entry
+    (running/queued jobs are left alone)."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    what = payload.get('what')
+    if what == 'tests':
+        n = 0
+        tdir = run_backtest.TEST_DATA_DIR
+        for name in (os.listdir(tdir) if os.path.isdir(tdir) else []):
+            p = os.path.join(tdir, name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+                n += 1
+        try:
+            conn = db.get_conn()
+            try:
+                db.clear_run_history(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            return JSONResponse({'error': 'archives deleted (%d) but DB clear failed: %s'
+                                 % (n, e)}, status_code=500)
+        return {'ok': True, 'deleted_archives': n, 'db_cleared': True}
+    if what == 'jobs':
+        n = 0
+        with _jobs_lock:
+            for jid, meta in list(_jobs.items()):
+                if meta['state'] in ('queued', 'running'):
+                    continue
+                shutil.rmtree(os.path.join(JOBS_DIR, jid), ignore_errors=True)
+                _jobs.pop(jid, None)
+                n += 1
+            _jobs_save()
+        return {'ok': True, 'deleted_jobs': n}
+    return JSONResponse({'error': "what must be 'tests' or 'jobs'"}, status_code=400)
+
+
+@app.get('/api/jobs/{jid}/results')
+def job_results(jid: str):
+    if not all(c.isalnum() or c in '-_' for c in jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+    if res is None:
+        return JSONResponse({'error': 'no results for this job (yet)'}, status_code=404)
+    res['chartbase'] = '/reports/jobs/%s/chartdata' % jid
+    res['job_id'] = jid
+    return res
+
+
+@app.get('/api/logs')
+def get_logs(since: int = 0, limit: int = 800):
+    """Server log lines with id > `since` (tail `limit`). The dashboard's log
+    window polls this incrementally."""
+    with _log_lock:
+        lines = [{'id': i, 't': t, 'line': l}
+                 for (i, t, l) in _LOG_BUF if i > since]
+    lines = lines[-max(1, min(limit, 2000)):]
+    return {'lines': lines,
+            'last': lines[-1]['id'] if lines else since}
+
+
+@app.get('/api/data/status')
+def data_status(interval: str = '1m'):
+    """Per-symbol data health for `interval`: first/last stored bar, age of the
+    last bar, and an integrity count (expected bars over the stored span vs
+    actual — crypto trades 24/7 so any shortfall is a real hole)."""
+    interval = interval if interval in ('1m', '1h') else '1m'
+    bar_s = 3600 if interval == '1h' else 60
+    try:
+        import db
+        conn = db.get_conn()
+    except Exception as e:
+        return JSONResponse({'error': 'db unavailable: %s' % e}, status_code=503)
+    try:
+        rows = db.per_symbol_span(conn, interval)
+    finally:
+        conn.close()
+    now = datetime.now(timezone.utc)
+    out = []
+    for sym, mn, mx, cnt in rows:
+        expected = int((mx - mn).total_seconds() // bar_s) + 1
+        out.append({'symbol': sym,
+                    'first': mn.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+                    'last': mx.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+                    'age_min': round((now - mx).total_seconds() / 60.0, 1),
+                    'bars': cnt,
+                    'expected': expected,
+                    'missing': max(0, expected - cnt)})
+    return {'interval': interval, 'generated': now.strftime('%Y-%m-%d %H:%M'),
+            'symbols': out}
+
+
+@app.get('/api/download/pyfolio')
+def download_pyfolio():
+    if not os.path.isdir(run_backtest.TEST_DATA_DIR):
+        return JSONResponse({'error': 'no report yet'}, status_code=404)
+    zip_base = os.path.join(REPORTS, 'test_data_report')
+    shutil.make_archive(zip_base, 'zip', run_backtest.TEST_DATA_DIR)
+    return FileResponse(zip_base + '.zip', filename='test_data_report.zip')
+
+
+if __name__ == '__main__':
+    uvicorn.run(app, host='127.0.0.1', port=8001)
