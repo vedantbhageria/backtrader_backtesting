@@ -138,9 +138,20 @@ class PortfolioStrategy(bt.Strategy):
                      (trade.data._name, 'LONG' if size > 0 else 'SHORT',
                       abs(size), trade.pnl, trade.pnlcomm))
 
+    def prenext(self):
+        # Backtrader delays next() until EVERY data has delivered its first
+        # bar, so one late-listed symbol (e.g. GWEIUSDT, listed months into
+        # the window) would idle the WHOLE portfolio until its listing date.
+        # next() already guards per-data readiness (len(d) / _last_len), so
+        # simply run the same logic during the pre-period.
+        self.next()
+
     def next(self):
+        ref = next((d for d in self.datas if len(d)), None)
+        if ref is None:
+            return
         self.equity.append((
-            self.datas[0].datetime.datetime(0).isoformat(),
+            ref.datetime.datetime(0).isoformat(),
             round(self.broker.getvalue(), 4),
         ))
 
@@ -164,6 +175,9 @@ class PortfolioStrategy(bt.Strategy):
                 signal, size = result
             else:
                 signal, size = result, None
+
+            if signal != signal:      # NaN signal (e.g. indicator not ready)
+                continue
 
             # Explicit flatten: on_bar returns (0, 0) -> go to cash. A bare
             # scalar 0 still means "hold / no change" (backward compatible).

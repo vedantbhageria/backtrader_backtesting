@@ -6,6 +6,7 @@ zoom, pan; no server logic, no CDN, no sockets). Serve the output folder:
     python -m http.server 8095 -d report_out
 """
 import glob
+import json
 import os
 
 import numpy as np
@@ -35,26 +36,107 @@ LABELS = {'P00': 'Var(position)', 'P11': 'Var(velocity)', 'P22': 'Var(accel)',
           'P01': 'Cov(pos, vel)', 'P02': 'Cov(pos, accel)', 'P12': 'Cov(vel, accel)'}
 
 
-def pick_symbol(prefer):
-    paths = sorted(glob.glob(os.path.join(DATA_DIR, '*-1m.csv')))
-    hit = [p for p in paths if os.path.basename(p).startswith(prefer + '-1m')]
+def pick_symbol(prefer, data_dir=DATA_DIR, suffix='1m'):
+    paths = sorted(glob.glob(os.path.join(data_dir, '*-%s.csv' % suffix)))
+    if not paths:
+        raise ValueError('no %s CSVs in %s — run a %s backtest or sync first'
+                         % (suffix, data_dir, suffix))
+    hit = [p for p in paths if os.path.basename(p).startswith('%s-%s' % (prefer, suffix))]
     p = hit[0] if hit else paths[0]
-    return os.path.basename(p)[:-len('-1m.csv')], p
+    return os.path.basename(p)[:-len('-%s.csv' % suffix)], p
 
 
-def run_strategy(label, Strat, params, path, sym, color):
+def _window_start(mn, mx, days):
+    """Start of the export window: last `days` before mx (None -> everything)."""
+    if not days:
+        return mn
+    from datetime import timedelta
+    return max(mn, mx - timedelta(days=days))
+
+
+def _ensure_symbol_csv(prefer, timeframe, days=None):
+    """Export the chosen symbol's history for `timeframe` from postgres so the
+    report reflects the database rather than whatever short window a prior run
+    happened to leave in datas/. `days` limits the window (None = everything).
+    Falls back to an existing CSV when the DB is unavailable."""
+    import run_backtest
+    data_dir, suffix, _ = run_backtest._tf_cfg(timeframe)
+    os.makedirs(data_dir, exist_ok=True)
+    try:
+        import db
+        conn = db.get_conn()
+    except Exception as e:
+        print('[report] DB unavailable (%s) — using existing %s CSVs' % (e, suffix))
+        return pick_symbol(prefer, data_dir, suffix)
+    try:
+        syms = db.symbols(conn, timeframe)
+        sym = (next((s for s in syms if s == prefer), None)
+               or next((s for s in syms if s.startswith(prefer)), None)
+               or (syms[0] if syms else None))
+        if not sym:
+            raise ValueError('database has no %s bars' % timeframe)
+        mn, mx = db.bars_span(conn, timeframe)
+        start = _window_start(mn, mx, days)
+        path = os.path.join(data_dir, '%s-%s.csv' % (sym, suffix))
+        n = db.export_bars_csv(conn, sym, start, mx, path, interval=timeframe)
+        print('[report] exported %s %s bars for %s (%s -> %s)'
+              % (n, timeframe, sym, start, mx))
+        return sym, path
+    finally:
+        conn.close()
+
+
+def _ensure_all_csvs(timeframe, days=None):
+    """Export EVERY symbol's history for `timeframe` from postgres (for the
+    all-symbols portfolio report). `days` limits the window (None = all).
+    Falls back to whatever CSVs exist when the DB is unavailable. Returns
+    [(sym, path), ...]."""
+    import run_backtest
+    data_dir, suffix, _ = run_backtest._tf_cfg(timeframe)
+    os.makedirs(data_dir, exist_ok=True)
+    existing = lambda: [(os.path.basename(p)[:-len('-%s.csv' % suffix)], p)
+                        for p in sorted(glob.glob(os.path.join(data_dir, '*-%s.csv' % suffix)))]
+    try:
+        import db
+        conn = db.get_conn()
+    except Exception as e:
+        print('[report] DB unavailable (%s) — using existing %s CSVs' % (e, suffix))
+        return existing()
+    try:
+        syms = db.symbols(conn, timeframe)
+        if not syms:
+            raise ValueError('database has no %s bars' % timeframe)
+        mn, mx = db.bars_span(conn, timeframe)
+        start = _window_start(mn, mx, days)
+        feeds = []
+        for sym in syms:
+            path = os.path.join(data_dir, '%s-%s.csv' % (sym, suffix))
+            if db.export_bars_csv(conn, sym, start, mx, path, interval=timeframe):
+                feeds.append((sym, path))
+        print('[report] exported %d symbols (%s bars, %s -> %s)'
+              % (len(feeds), timeframe, start, mx))
+        return feeds
+    finally:
+        conn.close()
+
+
+def run_strategy(label, Strat, params, feeds, color, compression=1):
+    """feeds: [(sym, path), ...]. A single feed keeps the filter internals
+    (diag) for the prediction/innovation/P charts; multiple feeds run the whole
+    portfolio and report equity/PnL only (diag=None)."""
     cer = bt.Cerebro()
     cer.broker.setcash(START_CASH)
     cer.broker.setcommission(commission=COMMISSION, leverage=LEVERAGE)
-    cer.adddata(bt.feeds.GenericCSVData(
-        dataname=path, dtformat='%Y-%m-%d %H:%M:%S',
-        timeframe=bt.TimeFrame.Minutes, compression=1,
-        datetime=0, open=1, high=2, low=3, close=4, volume=5,
-        openinterest=-1, name=sym))
-    cer.addstrategy(Strat, **dict(params, diag=True))
+    for sym, path in feeds:
+        cer.adddata(bt.feeds.GenericCSVData(
+            dataname=path, dtformat='%Y-%m-%d %H:%M:%S',
+            timeframe=bt.TimeFrame.Minutes, compression=compression,
+            datetime=0, open=1, high=2, low=3, close=4, volume=5,
+            openinterest=-1, name=sym))
+    cer.addstrategy(Strat, **dict(params, diag=(len(feeds) == 1)))
     strat = cer.run()[0]
     end = cer.broker.getvalue()
-    rows = strat._diag.get(sym, [])
+    rows = strat._diag.get(feeds[0][0], []) if len(feeds) == 1 else []
     if rows:                       # strategies without filter internals (e.g.
         diag = pd.DataFrame(rows)  # EMACross) still get equity/PnL panels
         diag['dt'] = pd.to_datetime(diag['t'], unit='s', utc=True)
@@ -201,20 +283,68 @@ def summary_table(results):
     return '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>' % (head, body)
 
 
+# (metric label, summary key, formatter) — mirrors the dashboard Account cards
+_PSTAT_ROWS = [
+    ('End value (USDT)',        'end_value',                    lambda v: '%.2f' % v),
+    ('PnL (USDT)',              'pnl',                          lambda v: '%+.2f' % v),
+    ('Return %',                'return_pct',                   lambda v: '%+.3f%%' % v),
+    ('Trades',                  'trades_closed',                lambda v: '%d' % v),
+    ('Win rate %',              'win_rate_pct',                 lambda v: '%.1f%%' % v),
+    ('Max drawdown %',          'max_drawdown_pct',             lambda v: '%.2f%%' % v),
+    ('Ann. return (CAGR)',      'annual_return_cagr',           lambda v: '%+.2f%%' % (100*v)),
+    ('Ann. volatility (ret)',   'annual_volatility_returns',    lambda v: '%.2f%%' % (100*v)),
+    ('Ann. volatility (log)',   'annual_volatility_log_returns', lambda v: '%.2f%%' % (100*v)),
+    ('Sharpe (arithmetic)',     'sharpe_arithmetic',            lambda v: '%.4f' % v),
+    ('Sharpe (log)',            'sharpe_log_returns',           lambda v: '%.4f' % v),
+]
+
+
+def stats_table(results):
+    """Portfolio-stats comparison (metrics as rows, runs as columns) for
+    results that carry a full run summary (archived-run compares)."""
+    runs = [r for r in results if r.get('summary')]
+    if not runs:
+        return ''
+    head = ''.join('<th>%s</th>' % r['name'] for r in runs)
+    body = ''
+    for label, key, fmt in _PSTAT_ROWS:
+        cells = ''
+        for r in runs:
+            v = r['summary'].get(key)
+            try:
+                cells += '<td>%s</td>' % ('&mdash;' if v is None or v != v else fmt(v))
+            except (TypeError, ValueError):
+                cells += '<td>%s</td>' % v
+        body += '<tr><th class="rowh">%s</th>%s</tr>' % (label, cells)
+    return ('<h2>Portfolio stats</h2>'
+            '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>'
+            % (head, body))
+
+
 def div(fig, first=False):
     return pio.to_html(fig, full_html=False,
                        include_plotlyjs=('inline' if first else False),
                        config={'displayModeBar': True, 'responsive': True, 'scrollZoom': True})
 
 
-def build(symbol=SYMBOL_PREF, selections=None):
+def build(symbol=SYMBOL_PREF, selections=None, timeframe='1m', days=None):
     """selections: [{'name': <registry name>, 'params': {...overrides}}, ...]
     (None -> DEFAULT_SELECTION). Classes and tuned defaults resolve through
     run_backtest.STRATEGIES; unknown params are dropped / type-coerced by the
-    same _resolve_run_config the run API uses."""
+    same _resolve_run_config the run API uses. `timeframe` ('1m'/'1h') selects
+    which bars the report runs on; `days` limits the window (None = all)."""
     import run_backtest
-    sym, path = pick_symbol(symbol)
-    print('[report] symbol:', sym)
+    timeframe = timeframe if timeframe in ('1m', '1h') else '1m'
+    _, _, comp = run_backtest._tf_cfg(timeframe)
+    if symbol:                                  # single-symbol: full internals
+        sym, path = _ensure_symbol_csv(symbol, timeframe, days)
+        feeds, subtitle = [(sym, path)], sym
+    else:                                       # no symbol -> whole portfolio
+        feeds = _ensure_all_csvs(timeframe, days)
+        if not feeds:
+            raise ValueError('no %s data available' % timeframe)
+        subtitle = 'all symbols (%d)' % len(feeds)
+    print('[report] %s  timeframe: %s' % (subtitle, timeframe))
     results = []
     for i, sel in enumerate(selections or DEFAULT_SELECTION):
         name = sel.get('name')
@@ -225,27 +355,39 @@ def build(symbol=SYMBOL_PREF, selections=None):
             name, sel.get('params'), None)
         color = PALETTE[i % len(PALETTE)]
         print('[report] running %s ...' % name)
-        res = run_strategy(name, cls, params, path, sym, color)
-        res['params'] = params
+        res = run_strategy(name, cls, params, feeds, color, comp)
+        res['params'] = dict(params, timeframe=timeframe)   # for the disclaimer
         results.append(res)
     if not results:
         raise ValueError('no valid strategies selected')
     print('[report] building interactive figures ...')
+    _render_page(results, subtitle=subtitle)
 
-    with_diag = [r for r in results if r['diag'] is not None]
+
+def _render_page(results, subtitle):
+    """Assemble + write the report from a results list. Strategies with filter
+    internals (diag not None) get the prediction/innovation/P charts; ones
+    without (archived-run comparisons) show only summary/PnL/equity."""
+    with_diag = [r for r in results if r.get('diag') is not None]
     ref = with_diag[0]['diag'] if with_diag else results[0]['equity']
     span = '%s → %s' % (ref.index[0].strftime('%Y-%m-%d'),
-                             ref.index[-1].strftime('%Y-%m-%d'))
+                        ref.index[-1].strftime('%Y-%m-%d'))
 
-    # which params each strategy ran with, so a shared report is self-describing
     cfg_lines = ''.join(
         '<p class="note"><b>%s</b> · %s</p>' % (
             r['name'],
             ', '.join('%s=%s' % (k, v) for k, v in sorted(r.get('params', {}).items())))
         for r in results)
 
+    # timeframe disclaimer (from whichever runs recorded one)
+    tfs = sorted({str((r.get('params') or {}).get('timeframe', '1m')) for r in results})
+    tf_note = ('<p class="note">📊 <b>Bars:</b> %s. All PnL, win-rate and risk '
+               'figures are computed on these bars.</p>' % ', '.join(tfs))
+
     parts = [
         summary_table(results),
+        stats_table(results),   # full portfolio-stats compare (archived runs)
+        tf_note,
         cfg_lines,
         '<p class="note">Interactive: <b>hover</b> for values, <b>drag</b> to zoom, '
         'double-click to reset. Series are downsampled to ~%d points for the browser.</p>' % DS,
@@ -275,13 +417,45 @@ def build(symbol=SYMBOL_PREF, selections=None):
             parts.append('<h3>%s</h3>' % res['name'] + div(fig_P(res)))
 
     names = ' vs '.join(r['name'] for r in results)
-    html = TEMPLATE.format(symbol=sym, span=span, names=names,
+    html = TEMPLATE.format(symbol=subtitle, span=span, names=names,
                            bars=len(ref), body='\n'.join(parts))
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, 'index.html')
     with open(out, 'w', encoding='utf-8') as f:
         f.write(html)
     print('[report] wrote %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
+
+
+def build_from_folders(tags):
+    """Compare ARCHIVED runs (reports/test_data/<tag>/run.json) instead of
+    running strategies fresh. Portfolio-level: equity, PnL, win rate + the
+    recorded params/timeframe — no per-symbol filter internals (not stored)."""
+    import run_backtest
+    tdir = run_backtest.TEST_DATA_DIR
+    results = []
+    for i, tag in enumerate(tags or []):
+        snap_path = os.path.join(tdir, tag, 'run.json')
+        if not os.path.exists(snap_path):
+            print('[report] archived run %r has no run.json — skipped' % tag)
+            continue
+        with open(snap_path, encoding='utf-8') as f:
+            snap = json.load(f)
+        p, s = snap.get('params', {}), snap.get('summary', {})
+        eq = pd.DataFrame(snap.get('equity', []), columns=['dt', 'value'])
+        if eq.empty:
+            continue
+        eq['dt'] = pd.to_datetime(eq['dt']); eq = eq.set_index('dt')
+        stats = dict(end_value=s.get('end_value'), pnl=s.get('pnl'),
+                     trades=s.get('trades_closed'), wins=s.get('won'),
+                     win_rate=s.get('win_rate_pct'), innov_rms=None)
+        label = '%s · %s' % (p.get('strategy', '?'), tag)
+        results.append(dict(name=label, diag=None, equity=eq, stats=stats,
+                            summary=s,                # full stats comparison
+                            color=PALETTE[i % len(PALETTE)], params=p))
+    if not results:
+        raise ValueError('no archived runs with usable snapshots selected')
+    print('[report] comparing %d archived run(s) ...' % len(results))
+    _render_page(results, subtitle='archived runs')
 
 
 TEMPLATE = """<!doctype html>

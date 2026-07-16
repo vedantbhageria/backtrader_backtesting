@@ -26,6 +26,16 @@ from EMAlgoNonLinTest import EMNonLinTest
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, 'datas')
+DATA_DIR_1H = os.path.join(BASE, 'datas_1h')
+
+
+def _tf_cfg(timeframe):
+    """(data_dir, filename_suffix, bt_compression) for a bar timeframe.
+    '1m' -> minute bars in datas/; '1h' -> hourly bars in datas_1h/ loaded
+    with backtrader compression=60."""
+    if (timeframe or '1m') == '1h':
+        return DATA_DIR_1H, '1h', 60
+    return DATA_DIR, '1m', 1
 REPORTS = os.path.join(BASE, 'reports')
 CHARTDATA_DIR = os.path.join(REPORTS, 'chartdata')    # per-symbol interactive chart data (JSON)
 TEST_DATA_DIR = os.path.join(REPORTS, 'test_data')   # per-run report archive
@@ -44,7 +54,17 @@ COMMISSION = 0.0002   # per-side, as a fraction of notional (0.0002 = 0.02%)
 # rf is a PER-MINUTE rate (RISK_FREE_ANNUAL / MINUTES_PER_YEAR), matching how
 # empyrical subtracts risk_free from every return observation.
 MINUTES_PER_YEAR = 365 * 24 * 60
-RISK_FREE_ANNUAL = 0.06   
+
+
+def _bars_per_day(timeframe):
+    return 24 if (timeframe or '1m') == '1h' else 1440
+
+
+def _bars_per_year(timeframe):
+    # Periods per year for annualization: 525600 for 1m, 8760 for 1h.
+    # (== MINUTES_PER_YEAR for 1m, so 1m behaviour is unchanged.)
+    return 365 * _bars_per_day(timeframe)
+RISK_FREE_ANNUAL = 0.06
 
 # ---- strategy selection -------------------------------------------------
 # Swap the strategy by changing these two lines. Any PortfolioStrategy
@@ -89,9 +109,30 @@ STRATEGIES = {
         trade_usd=2000.0, k=2.0, warmup=180, reversion=False,
         q_level=0.2e-3, q_vel=0.2e-6, q_acc=0.2e-9)),
     'EMNonLinTest': (EMNonLinTest, dict(
-        trade_usd=2000.0, k=2.5, warmup=180, reversion=False,
-        q_level=0.1e-3, q_vel=0.1e-6, q_acc=0.1e-9, d0=0.0, d_max=1e6,
-        em_window=720, em_interval=1440, em_iters=3)),
+        trade_usd=2000.0, k=2.5, warmup=180,
+        reversion=True,   # TUNED: fade the innovation. The filter's prediction
+                          # lags price (innov ACF ~0.97), so a band break marks
+                          # overextension, not momentum — 1h sweep: fade
+                          # +8.6k..+16.3k across k=1.5..4, follow mirror-negative.
+                          # (Pre-2026-07-16 code had the mapping swapped; old
+                          # reversion=False runs were ALREADY fading.)
+        q_level=0.1e-3, q_vel=0.1e-6, q_acc=0.1e-9, d0=0.0,
+        d_max=0.5,        # TUNED: bounds the drag-induced ringing (complex
+                          # eigenvalues 1±i·sqrt(2d|v|/z)). 1h sweep: pnl +22.5k
+                          # / Sharpe 2.34 vs +17.6k / 1.69 at d_max=5; d=0
+                          # removes ringing but collapses the edge (+6k).
+        em_window=720, em_interval=1440,
+        em_iters=2,       # TUNED: 3rd EM iter overfits drag into instability
+        max_hold=0,       # OFF. Trade-replay suggested a 14d time stop helps,
+                          # but the REAL backtest disagrees: after a forced
+                          # flatten the still-stretched innovation re-enters
+                          # immediately, so it just churns (A/B: +16.3k -> -1.7k).
+                          # Set ~336 (1h) only if minimizing drawdown matters
+                          # more than pnl (maxDD 12.5% -> 6.7%).
+        long_only=True,   # TUNED: real A/B +17.6k / Sharpe 1.69 / win 65.5%
+                          # vs +16.3k / 1.41 with shorts — shorts added risk
+                          # for nothing (all 10 worst trades were shorts).
+        dead=300)),
     'EMACrossShortTest': (EMACrossShortTest, dict(
         trade_usd=2000.0, fast_ema_period=60, slow_ema_period=120)),
 }
@@ -139,7 +180,7 @@ def _status(**kw):
         json.dump(kw, f)
 
 
-def _prepare_csvs_from_db(days=None):
+def _prepare_csvs_from_db(days=None, timeframe='1m'):
     try:
         import db
         conn = db.get_conn()
@@ -147,7 +188,7 @@ def _prepare_csvs_from_db(days=None):
         print('[backtest] DB unavailable (%s) — using existing CSVs in datas/' % e)
         return None
     try:
-        mn, mx = db.bars_span(conn)
+        mn, mx = db.bars_span(conn, timeframe)
         if mn is None:
             raise ValueError('database has no bars — run fetch_binance_csv.py first')
         naive = lambda t: t.astimezone(timezone.utc).replace(tzinfo=None)
@@ -166,17 +207,19 @@ def _prepare_csvs_from_db(days=None):
                 '(available %s -> %s), aborting run'
                 % (start, end, avail_first, avail_last))
 
-        os.makedirs(DATA_DIR, exist_ok=True)
-        for old in glob.glob(os.path.join(DATA_DIR, '*.csv')):
+        data_dir, suffix, _ = _tf_cfg(timeframe)
+        os.makedirs(data_dir, exist_ok=True)
+        for old in glob.glob(os.path.join(data_dir, '*.csv')):
             os.remove(old)
         start_aw = start.replace(tzinfo=timezone.utc)
         end_aw = end.replace(tzinfo=timezone.utc)
-        expected = int((end - start).total_seconds() // 60)   # ~bars in a full window
+        bar_s = 3600 if timeframe == '1h' else 60
+        expected = int((end - start).total_seconds() // bar_s)  # ~bars in a full window
 
         n_sym, short, missing = 0, [], []
-        for sym in db.symbols(conn):
-            path = os.path.join(DATA_DIR, '%s-1m.csv' % sym)
-            n = db.export_bars_csv(conn, sym, start_aw, end_aw, path)
+        for sym in db.symbols(conn, timeframe):
+            path = os.path.join(data_dir, '%s-%s.csv' % (sym, suffix))
+            n = db.export_bars_csv(conn, sym, start_aw, end_aw, path, interval=timeframe)
             if n == 0:
                 missing.append(sym)
                 continue
@@ -212,14 +255,15 @@ def _csv_span(path):
     return datetime.strptime(first, fmt), datetime.strptime(last, fmt)
 
 
-def _resolve_window(days=None):
+def _resolve_window(days=None, timeframe='1m'):
     """Backtest [start, end] from config + what the CSVs actually cover.
 
     Returns (start, end) or raises ValueError with the abort message when the
     requested period isn't present in the data.
     """
     spans = []
-    for p in glob.glob(os.path.join(DATA_DIR, '*-1m.csv')):
+    _dd, _suf, _ = _tf_cfg(timeframe)
+    for p in glob.glob(os.path.join(_dd, '*-%s.csv' % _suf)):
         try:
             spans.append(_csv_span(p))
         except Exception:
@@ -244,15 +288,16 @@ def _resolve_window(days=None):
     return start, end
 
 
-def _load_feeds(cerebro, fromdate, todate):
+def _load_feeds(cerebro, fromdate, todate, timeframe='1m'):
     symbols = []
-    for path in sorted(glob.glob(os.path.join(DATA_DIR, '*-1m.csv'))):
-        sym = os.path.basename(path)[:-len('-1m.csv')]
+    data_dir, suffix, comp = _tf_cfg(timeframe)
+    for path in sorted(glob.glob(os.path.join(data_dir, '*-%s.csv' % suffix))):
+        sym = os.path.basename(path)[:-len('-%s.csv' % suffix)]
         data = bt.feeds.GenericCSVData(
             dataname=path,
             dtformat='%Y-%m-%d %H:%M:%S',
             timeframe=bt.TimeFrame.Minutes,
-            compression=1,
+            compression=comp,
             datetime=0, open=1, high=2, low=3, close=4, volume=5,
             openinterest=-1,
             name=sym,
@@ -284,13 +329,15 @@ def _resample_returns(rets, bars_per_period=60*24):
             count = 0
     return out
 
-def _risk_metrics(rets):
+def _risk_metrics(rets, bars_per_day=1440):
 
     import pandas as pd
 
     r_minute = [x for x in rets if x == x]        # drop NaN
-    r = _resample_returns(r_minute)
-    print(r)
+    # resample raw bars -> daily returns (bars_per_day depends on timeframe:
+    # 1440 for 1m, 24 for 1h) so the annualisation below (T=365 days) is
+    # correct regardless of bar size.
+    r = _resample_returns(r_minute, bars_per_day)
     n = len(r)
     if n < 2:
         return {}
@@ -429,9 +476,10 @@ def _dump_position_logs(strat, out_dir):
     return len(strat.trade_log)
 
 
-def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols, days=None):
+def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols, days=None,
+                     timeframe='1m'):
     import csv as _csv
-    rows = [('strategy', type(strat).__name__)]
+    rows = [('strategy', type(strat).__name__), ('timeframe', timeframe)]
     eff = {k: getattr(strat.params, k) for k in strat.params._getkeys()}
     for k, v in eff.items():
         rows.append(('param.%s' % k, v))
@@ -490,7 +538,7 @@ def _write_report_xlsx(out_dir, config_rows, stats, run_tag):
         cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
         ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
 
-def _pyfolio_report(strat, out_dir):
+def _pyfolio_report(strat, out_dir, timeframe='1m'):
     """Export pyfolio items + tear sheet into out_dir (one folder per run,
     e.g. reports/pyfolio/20260707-153000/ — old runs are never overwritten)."""
     os.makedirs(out_dir, exist_ok=True)
@@ -512,11 +560,14 @@ def _pyfolio_report(strat, out_dir):
 
         try:
             import empyrical as ep
-            MPY = MINUTES_PER_YEAR       # minutes per year (crypto trades 24/7)
-            rf = RISK_FREE_ANNUAL / MPY  # per-observation rate (returns are 1m)
+            # Bars-per-year for the chosen timeframe (525600 for 1m, 8760 for
+            # 1h) so empyrical's Sortino/Calmar/VaR annualize correctly and the
+            # per-observation risk-free rate matches the bar size.
+            MPY = _bars_per_year(timeframe)
+            rf = RISK_FREE_ANNUAL / MPY  # per-observation rate
             r = returns.dropna()
 
-            rm = _risk_metrics(list(r.values))
+            rm = _risk_metrics(list(r.values), _bars_per_day(timeframe))
             raw = {
                 'Cumulative return': rm.get('cumulative_return'),
                 'Annualised return (CAGR)': rm.get('annual_return_cagr'),
@@ -579,13 +630,14 @@ def _dget(node, *keys, default=0):
     return cur if cur or cur == 0 else default
 
 
-def run(strategy=None, params=None, days=None):
+def run(strategy=None, params=None, days=None, timeframe='1m'):
     started = time.time()
     cls, eff_params, days = _resolve_run_config(strategy, params, days)
+    timeframe = timeframe if timeframe in ('1m', '1h') else '1m'
 
     try:
         _status(state='running', phase='loading',
-                strategy=cls.__name__, days=days)
+                strategy=cls.__name__, days=days, timeframe=timeframe)
         os.makedirs(REPORTS, exist_ok=True)
         shutil.rmtree(CHARTDATA_DIR, ignore_errors=True)
         for stale in ('trades.csv', 'positions.csv'):
@@ -595,9 +647,9 @@ def run(strategy=None, params=None, days=None):
                 pass
 
         try:
-            window = _prepare_csvs_from_db(days)
+            window = _prepare_csvs_from_db(days, timeframe)
             if window is None:
-                window = _resolve_window(days)
+                window = _resolve_window(days, timeframe)
             bt_start, bt_end = window
         except ValueError as e:
             print('[backtest] %s' % e)
@@ -609,7 +661,7 @@ def run(strategy=None, params=None, days=None):
         cerebro.broker.setcash(STARTING_CASH)
         cerebro.broker.setcommission(commission=COMMISSION, leverage=float(LEVERAGE))
 
-        symbols = _load_feeds(cerebro, bt_start, bt_end)
+        symbols = _load_feeds(cerebro, bt_start, bt_end, timeframe)
         if not symbols:
             _status(state='error',
                     error='no CSVs in datas/ — run fetch_binance_csv.py first')
@@ -622,7 +674,8 @@ def run(strategy=None, params=None, days=None):
 
 
         cerebro.addanalyzer(bt.analyzers.PyFolio, _name='pyfolio',
-                            timeframe=bt.TimeFrame.Minutes, compression=1)
+                            timeframe=bt.TimeFrame.Minutes,
+                            compression=_tf_cfg(timeframe)[2])
         cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
         cerebro.addanalyzer(bt.analyzers.DrawDown, _name='dd')
 
@@ -648,7 +701,7 @@ def run(strategy=None, params=None, days=None):
         pf_returns, _pf_pos, _pf_txn, _pf_lev = pyf.get_pf_items()
         rets = list(pf_returns.dropna().values)
 
-        rm = _risk_metrics(rets)
+        rm = _risk_metrics(rets, _bars_per_day(timeframe))
         rnd = lambda k, d=4: (None if rm.get(k) is None or rm.get(k) != rm.get(k)
                               else round(rm[k], d))
 
@@ -692,10 +745,11 @@ def run(strategy=None, params=None, days=None):
         _status(state='running', phase='pyfolio')
         run_tag = time.strftime('%Y%m%d-%H%M%S')
         run_dir = os.path.join(TEST_DATA_DIR, run_tag)
-        pf_images, pf_stats, pf_error = _pyfolio_report(strat, run_dir)
+        pf_images, pf_stats, pf_error = _pyfolio_report(strat, run_dir, timeframe)
         import pandas as pd
         n_pos = _dump_position_logs(strat, run_dir)
-        config_rows = _dump_run_config(run_dir, strat, bt_start, bt_end, len(symbols))
+        config_rows = _dump_run_config(run_dir, strat, bt_start, bt_end,
+                                       len(symbols), days, timeframe)
         _write_report_xlsx(run_dir, config_rows, pf_stats, run_tag)   # config + perf_stats
         print('[backtest] report done (%s) -> test_data/%s (%d positions)'
               % (pf_error or 'ok', run_tag, n_pos))
@@ -722,6 +776,7 @@ def run(strategy=None, params=None, days=None):
             'generated': datetime.now(timezone.utc).isoformat(),
             'params': dict(eff_params,
                            strategy=cls.__name__,
+                           timeframe=timeframe,
                            leverage=LEVERAGE,
                            window_start=bt_start.isoformat(),
                            window_end=bt_end.isoformat()),
@@ -751,6 +806,19 @@ def run(strategy=None, params=None, days=None):
 
         with open(RESULTS_PATH, 'w', encoding='utf-8') as f:
             json.dump(results, f)
+
+        # Self-describing snapshot in the run's archive folder so it can be
+        # reloaded/compared later just by selecting the folder (name, params,
+        # summary, per-symbol, equity — everything the dashboard shows, minus
+        # the per-symbol candle/indicator chart data which we don't reload).
+        snapshot = {k: results[k] for k in
+                    ('generated', 'params', 'summary', 'per_symbol', 'equity')}
+        snapshot['run_tag'] = run_tag
+        try:
+            with open(os.path.join(run_dir, 'run.json'), 'w', encoding='utf-8') as f:
+                json.dump(snapshot, f)
+        except OSError as e:
+            print('[backtest] run.json snapshot failed: %s' % e)
 
         _status(state='done', elapsed=round(time.time() - started, 1),
                 pnl=summary['pnl'], trades=n_closed)

@@ -28,7 +28,11 @@
   .brand .dot { width: 10px; height: 10px; border-radius: 50%;
                 background: var(--accent); box-shadow: 0 0 10px var(--accent); flex-shrink: 0; }
   .brand h1 { margin: 0; font-size: 16px; font-weight: 600; white-space: nowrap; }
-  #meta { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* single clipped row — the full param set lives in the Config panel /
+     History tab, so the header just shows what fits without ballooning. */
+  #meta { display: flex; gap: 6px; flex-wrap: nowrap; overflow: hidden;
+          min-width: 0; -webkit-mask-image: linear-gradient(90deg,#000 88%,transparent);
+          mask-image: linear-gradient(90deg,#000 88%,transparent); }
   @media (max-width: 1150px) { #meta { display: none; } }
   @media (max-width: 700px) {
     header { flex-wrap: wrap; }
@@ -38,7 +42,13 @@
   #meta .chip { font-size: 11px; color: var(--muted); background: var(--panel2);
                 border: 1px solid var(--border); border-radius: 999px;
                 padding: 2px 10px; white-space: nowrap; }
-  .runbox { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  .runbox { display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+            flex-wrap: wrap; justify-content: flex-end; }
+  .tgroup { display: inline-flex; align-items: center; gap: 6px; }
+  .tsep { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
+  .tinynote { font-size: 11px; color: var(--muted); max-width: 220px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tinynote:empty { display: none; }
   #runstatus { font-size: 12px; color: var(--muted); display: none;
                align-items: center; gap: 7px; background: var(--panel2);
                border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; }
@@ -251,6 +261,99 @@
                                  background: var(--panel); border: 1px solid var(--border);
                                  border-radius: 999px; padding: 2px 10px; }
   .histscroll { max-height: calc(100vh - 240px); overflow-y: auto; }
+
+  /* ---------- sortable table headers (history + positions) ---------- */
+  th[data-key] { cursor: pointer; user-select: none; }
+  th[data-key]:hover { color: var(--text); }
+  th[data-key]::after { content: '\2195'; opacity: .28; font-size: 9px;
+                        margin-left: 4px; }
+  th[data-sort="1"]::after  { content: '\25B2'; opacity: 1; color: var(--accent); }
+  th[data-sort="-1"]::after { content: '\25BC'; opacity: 1; color: var(--accent); }
+  .hfilter { background: var(--panel); color: var(--text);
+             border: 1px solid var(--border); border-radius: 7px;
+             padding: 4px 10px; font-size: 12px; outline: none; width: 180px; }
+  .hfilter:focus { border-color: var(--accent); }
+  .hh-tools { display: inline-flex; align-items: center; gap: 12px; }
+  .modetabs { display: inline-flex; gap: 4px; }
+  .modetab { background: var(--panel2); color: var(--muted); border: 1px solid var(--border);
+             border-radius: 7px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; }
+  .modetab.active { color: var(--text); border-color: var(--accent); }
+  #loadpanel { max-width: 1500px; margin: 14px auto 0; padding: 0 24px; }
+  #loadtbl, #datatbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #loadtbl th, #loadtbl td, #datatbl th, #datatbl td
+    { padding: 7px 14px; text-align: left; white-space: nowrap; }
+  #datatbl td.num, #datatbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #datatbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #datatbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+    font-weight: 600; border-bottom: 1px solid var(--border); }
+  #datatbl td.bad { color: var(--red); }
+  #datatbl td.ok { color: var(--green); }
+  /* ---------- saved-configs tab ---------- */
+  #cfgstbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #cfgstbl th, #cfgstbl td { padding: 7px 12px; text-align: left; vertical-align: top; }
+  #cfgstbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+    font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  #cfgstbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  .cfgchips { max-width: 340px; }
+  .cfgchips .chip { font-size: 11px; color: var(--muted); background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px;
+    margin: 1px 3px 1px 0; display: inline-block; white-space: nowrap; }
+  .cfgnotes { width: 100%; min-width: 200px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+    font: 12px/1.4 inherit; padding: 5px 8px; resize: vertical; }
+  /* ---------- floating server-log window ---------- */
+  #logwin { position: fixed; right: 18px; bottom: 18px; z-index: 1000;
+    width: min(760px, 92vw); height: 340px; min-width: 340px; min-height: 160px;
+    display: flex; flex-direction: column; resize: both; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.5); }
+  #logwin[hidden] { display: none; }
+  #logwin-h { display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 12px; background: var(--panel2); border-bottom: 1px solid var(--border);
+    font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: move;
+    user-select: none; flex: 0 0 auto; }
+  .logwin-btns a { color: var(--muted); text-decoration: none; margin-left: 12px;
+    font-weight: 400; }
+  .logwin-btns a:hover { color: var(--text); }
+  #logout { flex: 1 1 auto; margin: 0; padding: 8px 12px; overflow: auto;
+    font: 11.5px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap;
+    word-break: break-all; color: var(--text); }
+  #logout .lt { color: var(--muted); }
+  #logout .lerr { color: var(--red); }
+  #logout .lwarn { color: var(--amber); }
+  #loadtbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+                font-weight: 600; border-bottom: 1px solid var(--border); }
+  #loadtbl td.num, #loadtbl th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #loadtbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
+  #reptags label, #reptags { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  #reptags label { align-items: center; gap: 7px; font-size: 12.5px; }
+  .loadbanner { background: rgba(210,153,34,.14); border: 1px solid var(--amber);
+                color: var(--amber); border-radius: 8px; padding: 6px 14px;
+                font-size: 12.5px; margin-bottom: 12px; display: inline-block; }
+
+  /* ---------- console tab ---------- */
+  #conout { margin: 0; padding: 14px 16px; min-height: 300px;
+            max-height: calc(100vh - 330px); overflow-y: auto;
+            font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace;
+            white-space: pre-wrap; word-break: break-word;
+            border-bottom: 1px solid var(--border); }
+  #conout .cin { color: var(--accent); }
+  #conout .cerr { color: var(--red); }
+  #coninrow { display: flex; align-items: flex-start; gap: 10px;
+              padding: 10px 16px; }
+  .conprompt { font: 13px/1.7 ui-monospace, Menlo, Consolas, monospace;
+               color: var(--accent); }
+  #conin { flex: 1; resize: vertical; background: var(--panel2);
+           color: var(--text); border: 1px solid var(--border);
+           border-radius: 7px; padding: 7px 10px; outline: none;
+           font: 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  #conin:focus { border-color: var(--accent); }
+  #conrun { background: #238636; color: #fff; border: 1px solid #2ea043;
+            border-radius: 7px; padding: 7px 16px; font-size: 12.5px;
+            font-weight: 600; cursor: pointer; }
+  #conrun:hover:not(:disabled) { background: #2ea043; }
+  #conrun:disabled { background: var(--panel2); border-color: var(--border);
+                     color: var(--faint); cursor: default; }
 </style>
 </head>
 <body>
@@ -262,14 +365,14 @@
   </div>
   <div class="runbox">
     <span id="runstatus"></span>
-    <span id="syncstatus" class="note"></span>
-    <span class="syncgroup" title="Incremental data sync (same as launch.bat): downloads only the bars missing from postgres over the last N days">
-      <input id="syncdays" type="number" min="1" step="1" value="180">
-      <button id="syncbtn" class="ghostbtn">Sync Data</button>
+    <span id="repstatus" class="tinynote"></span>
+    <span class="tgroup">
+      <button id="loadbtn" class="ghostbtn" title="Load a saved backtest (PnL + positions)">Load</button>
+      <button id="repbtn" class="ghostbtn" title="Comparison report">Report</button>
+      <button id="cfgbtn" class="ghostbtn" title="Strategy, timeframe, params, data sync">⚙ Config</button>
+      <button id="logbtn" class="ghostbtn" title="Server log (run warnings, excluded symbols, errors)">Logs</button>
     </span>
-    <span id="repstatus" class="note"></span>
-    <button id="repbtn" class="ghostbtn" title="Rebuild the KF vs EKF vs EM comparison report">Report</button>
-    <button id="cfgbtn" class="ghostbtn" title="Strategy &amp; parameters">⚙ Config</button>
+    <span class="tsep"></span>
     <button id="runbtn">Run Backtest</button>
   </div>
 </header>
@@ -283,12 +386,45 @@
         <select id="cfgstrategy"></select>
       </div>
       <div class="cfgfield">
+        <label for="cfgtf">Bar timeframe</label>
+        <select id="cfgtf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
+      </div>
+      <div class="cfgfield">
         <label for="cfgdays">Backtest days</label>
         <input id="cfgdays" type="number" min="1" step="1">
       </div>
       <span id="cfgparams" style="display:contents"></span>
+      <div style="flex-basis:100%;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+        <div class="cfgfield">
+          <label for="cfgsavename">Config name</label>
+          <input id="cfgsavename" type="text" placeholder="e.g. fade-tuned-v2">
+        </div>
+        <button id="cfgsave" class="ghostbtn" title="Save these params for this strategy + timeframe (see the Configs tab)">💾 Save config (1m)</button>
+        <span id="cfgsavestatus" class="tinynote"></span>
+      </div>
       <p class="note" id="cfgnote">These settings apply to the next <b>Run Backtest</b>.
-        Unchanged fields use the strategy's tuned defaults.</p>
+        Unchanged fields use the strategy's tuned defaults — or your saved
+        <b>default</b> config for this strategy + timeframe (Configs tab).</p>
+    </div>
+    <div class="panel-h" style="border-top:1px solid var(--border)"><span>Data &amp; modules</span></div>
+    <div class="panel-b" style="display:flex;flex-wrap:wrap;gap:14px 22px;align-items:flex-end">
+      <div class="cfgfield">
+        <label for="syncdays">Sync days</label>
+        <input id="syncdays" type="number" min="1" step="1" value="180">
+      </div>
+      <div class="cfgfield">
+        <label for="synctf">Sync timeframe</label>
+        <select id="synctf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
+      </div>
+      <button id="syncbtn" class="ghostbtn">Sync data</button>
+      <button id="latestbtn" class="ghostbtn" title="Last stored bar per symbol for the selected timeframe">Latest bars</button>
+      <button id="integbtn" class="ghostbtn" title="Check every symbol for holes in the stored bars">Integrity check</button>
+      <button id="reloadbtn" class="ghostbtn" title="Reload strategy code &amp; default params from disk">↻ Reload strategies</button>
+      <span id="syncstatus" class="tinynote"></span>
+      <p class="note" style="flex-basis:100%">Sync downloads only the bars missing from
+        postgres for the chosen timeframe. Latest bars / Integrity check inspect what's
+        stored for that timeframe. Reload picks up code / default-param edits without a run.</p>
+      <div id="datastatus" class="histscroll" style="flex-basis:100%;max-height:280px;display:none"></div>
     </div>
   </div>
 </div>
@@ -297,25 +433,79 @@
     <div class="panel-h"><span>Comparison report</span>
       <button id="repbuild">build report</button></div>
     <div class="panel-b">
-      <div class="cfgfield">
-        <label for="repsymbol">Symbol</label>
-        <input id="repsymbol" type="text" value="ETHUSDT">
+      <div class="cfgfield" style="flex-basis:100%">
+        <label>Mode</label>
+        <span class="modetabs">
+          <button class="modetab active" data-mode="new">Generate from new data</button>
+          <button class="modetab" data-mode="old">Compare saved runs</button>
+        </span>
       </div>
-      <div id="repstrats"></div>
-      <p class="note" id="repnote">Tick the strategies to compare; expand one to
-        override its params (unticked fields of expanded strategies use their tuned
-        defaults). Strategies without filter internals (e.g. EMACross) appear in the
-        equity/PnL charts only.</p>
+      <div id="repnewbox" style="display:contents">
+        <div class="cfgfield">
+          <label for="repsymbol">Symbol <span class="tinynote">(empty = all symbols, PnL/equity only)</span></label>
+          <input id="repsymbol" type="text" value="ETHUSDT" placeholder="all symbols">
+        </div>
+        <div class="cfgfield">
+          <label for="reptf">Timeframe</label>
+          <select id="reptf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
+        </div>
+        <div class="cfgfield">
+          <label for="repdays">Backtest days <span class="tinynote">(empty = all data)</span></label>
+          <input id="repdays" type="number" min="1" step="1" placeholder="all">
+        </div>
+        <div id="repstrats"></div>
+      </div>
+      <div id="repoldbox" style="display:none;flex-basis:100%">
+        <div id="reptags"></div>
+      </div>
+      <p class="note" id="repnote">Generate: run the ticked strategies fresh on data pulled
+        straight from postgres — one symbol (full filter internals) or all symbols (PnL/equity
+        only), over the last N days or everything. Compare saved: pick past runs to compare
+        their PnL / win-rate / equity (no filter internals — those aren't stored).</p>
     </div>
   </div>
+</div>
+
+<div id="loadpanel" hidden>
+  <div class="panel">
+    <div class="panel-h"><span>Load a saved backtest</span>
+      <span class="note"><a href="#" id="loadrefresh">refresh</a> ·
+        <a href="#" id="loadlive">back to latest run</a></span></div>
+    <div class="histscroll">
+      <table id="loadtbl">
+        <thead><tr><th></th><th>Saved (UTC)</th><th>Strategy</th><th>TF</th>
+          <th class="num">PnL</th><th class="num">Return %</th>
+          <th class="num">Trades</th><th class="num">Symbols</th></tr></thead>
+        <tbody id="loadbody"></tbody>
+      </table>
+    </div>
+    <p class="note" style="padding:10px 16px">Loads a run's PnL + positions from its
+      saved folder. Candle/indicator charts aren't reloaded (not stored) — you'll see
+      the Account stats and per-symbol positions only.</p>
+  </div>
+</div>
+
+<!-- floating server-log window (toggle with the Logs button, drag by its title bar) -->
+<div id="logwin" hidden>
+  <div id="logwin-h">
+    <span>Server log</span>
+    <span class="logwin-btns">
+      <a href="#" id="logclear" title="Clear the view (server keeps its buffer)">clear</a>
+      <a href="#" id="logclose" title="Close">✕</a>
+    </span>
+  </div>
+  <pre id="logout"></pre>
 </div>
 <nav>
   <button class="tab active" data-tab="charts">Charts</button>
   <button class="tab" data-tab="account">Account</button>
   <button class="tab" data-tab="history">History</button>
+  <button class="tab" data-tab="configs">Configs</button>
+  <button class="tab" data-tab="console">Console</button>
 </nav>
 <main>
   <div id="empty" hidden>No results yet — press <b>Run Backtest</b>.</div>
+  <div id="loadbanner" class="loadbanner" style="display:none"></div>
 
   <section id="tab-charts">
     <aside>
@@ -376,20 +566,72 @@
   <section id="tab-history" hidden>
     <div class="panel">
       <div class="panel-h"><span>Run history · Postgres</span>
-        <span class="note"><a href="#" id="histrefresh">refresh</a></span></div>
+        <span class="hh-tools">
+          <input id="histfilter" class="hfilter" placeholder="filter strategy / id / date…">
+          <a href="#" id="histrefresh" class="note">refresh</a>
+        </span></div>
       <div class="histscroll">
         <table id="histtbl">
           <thead><tr>
-            <th class="num">#</th><th>Generated (UTC)</th><th>Strategy</th>
-            <th class="num">Days</th><th class="num">PnL</th>
-            <th class="num">Return %</th><th class="num">Trades</th>
-            <th class="num">Win %</th><th class="num">Max DD %</th>
+            <th class="num" data-key="id">#</th>
+            <th data-key="generated">Generated (UTC)</th>
+            <th data-key="strategy">Strategy</th>
+            <th data-key="tf">TF</th>
+            <th class="num" data-key="days">Days</th>
+            <th class="num" data-key="pnl">PnL</th>
+            <th class="num" data-key="return_pct">Return %</th>
+            <th class="num" data-key="trades">Trades</th>
+            <th class="num" data-key="win">Win %</th>
+            <th class="num" data-key="sharpe">Sharpe</th>
+            <th class="num" data-key="dd">Max DD %</th>
           </tr></thead>
           <tbody id="histbody"></tbody>
         </table>
       </div>
-      <p class="note" style="padding:10px 16px" id="histnote">Click a row to see
-        the full parameter set of that run.</p>
+      <p class="note" style="padding:10px 16px" id="histnote">Click a header to sort ·
+        type to filter · click a row for its full parameter set.</p>
+    </div>
+  </section>
+
+  <section id="tab-configs" hidden>
+    <div class="panel">
+      <div class="panel-h"><span>Saved configs · per strategy &amp; timeframe</span>
+        <a href="#" id="cfgsrefresh" class="note">refresh</a></div>
+      <div class="histscroll">
+        <table id="cfgstbl">
+          <thead><tr>
+            <th title="the default config auto-fills the Config panel when you pick its strategy + timeframe">Default</th>
+            <th>Strategy</th><th>TF</th><th>Name</th><th>Saved (UTC)</th>
+            <th>Params</th><th style="min-width:220px">Notes</th><th></th>
+          </tr></thead>
+          <tbody id="cfgsbody"></tbody>
+        </table>
+      </div>
+      <p class="note" style="padding:10px 16px">Save the current panel settings with
+        <b>💾 Save config</b> in ⚙ Config. The <b>default</b> config of a strategy +
+        timeframe pair auto-fills the panel whenever you select that pair. Notes save
+        when you click away from the box. <b>Load</b> puts a config into the panel.</p>
+    </div>
+  </section>
+
+  <section id="tab-console" hidden>
+    <div class="panel">
+      <div class="panel-h"><span>Python console · analyse the generated data</span>
+        <span><button id="conrestart" class="ghostbtn" style="padding:3px 10px;font-size:11px"
+          title="Kill the worker: unsticks runaway code, clears all variables">restart kernel</button></span>
+      </div>
+      <pre id="conout"></pre>
+      <div id="coninrow">
+        <span class="conprompt">&gt;&gt;&gt;</span>
+        <textarea id="conin" rows="2" spellcheck="false"
+          placeholder="python — Enter runs, Shift+Enter = newline, &uarr;/&darr; history.  Try: helpdata()"></textarea>
+        <button id="conrun">Run</button>
+      </div>
+      <p class="note" style="padding:8px 16px">Persistent namespace (variables survive
+        between commands). Helpers: <code>results()</code>, <code>symbols()</code>,
+        <code>candles(sym)</code>, <code>positions(sym)</code>, <code>lines(sym)</code>,
+        <code>markers(sym)</code>, <code>equity()</code> — plus <code>np</code>,
+        <code>pd</code>. Localhost only.</p>
     </div>
   </section>
 </main>
@@ -402,6 +644,23 @@ const $ = id => document.getElementById(id);
 const fmt = (v, d=2) => v == null ? '—' :
       Number(v).toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: d});
 
+/* ---- shared table sorting helpers ---- */
+// nulls/NaN sort to the bottom in ascending order (top when descending).
+function cmpVal(a, b) {
+  if (typeof a === 'number' || typeof b === 'number') {
+    a = (a == null || Number.isNaN(a)) ? -Infinity : a;
+    b = (b == null || Number.isNaN(b)) ? -Infinity : b;
+    return a - b;
+  }
+  return String(a ?? '').localeCompare(String(b ?? ''));
+}
+function syncSort(tblSel, sort) {
+  document.querySelectorAll(tblSel + ' thead th[data-key]').forEach(th => {
+    if (th.dataset.key === sort.key) th.dataset.sort = String(sort.dir);
+    else th.removeAttribute('data-sort');
+  });
+}
+
 /* ---- tabs ---- */
 document.querySelectorAll('nav .tab').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav .tab').forEach(x => x.classList.remove('active'));
@@ -409,7 +668,11 @@ document.querySelectorAll('nav .tab').forEach(b => b.onclick = () => {
   $('tab-charts').hidden = b.dataset.tab !== 'charts';
   $('tab-account').hidden = b.dataset.tab !== 'account';
   $('tab-history').hidden = b.dataset.tab !== 'history';
+  $('tab-configs').hidden = b.dataset.tab !== 'configs';
+  $('tab-console').hidden = b.dataset.tab !== 'console';
+  if (b.dataset.tab === 'configs') loadSavedConfigs();
   if (b.dataset.tab === 'history') loadHistory();
+  if (b.dataset.tab === 'console') $('conin').focus();
 });
 
 /* ---- charts tab ---- */
@@ -448,7 +711,10 @@ function selectSymbol(sym) {
   } else {
     $('chartwrap').style.display = 'none';
     $('charthint').style.display = 'none';
-    $('positions').innerHTML = '';
+    // Archived loads have no chart data but keep saved positions per symbol.
+    const pos = (R.positionsBySymbol || {})[sym];
+    if (pos && pos.length) { curPositions = []; renderPositions(sym, pos); }
+    else $('positions').innerHTML = '';
   }
 }
 $('symsearch').oninput = renderSymbols;
@@ -534,8 +800,10 @@ $('shadechk').onchange = drawPosOverlay;
 // Set (or clear, i = -1) the highlighted position and repaint.
 function setHighlight(i) {
   selPos = i;
-  document.querySelectorAll('#postbl tbody tr').forEach((tr, j) =>
-    tr.classList.toggle('selrow', j === i));
+  // match by the row's ORIGINAL curPositions index (data-i), not DOM position,
+  // since the table can be re-sorted independently of curPositions.
+  document.querySelectorAll('#postbl tbody tr').forEach(tr =>
+    tr.classList.toggle('selrow', +tr.dataset.i === i));
   drawPosOverlay();   // draw immediately (rAF can be throttled when offscreen)
 }
 // Row click: toggle the highlight on/off (no chart movement).
@@ -587,18 +855,35 @@ function buildLineToggles(lineSeries) {
 }
 
 // Per-stock position log: one row per closed position (open -> close).
+let posCtx = null;                       // {sym, positions} for re-sorting
+let posSort = {key: null, dir: 1};       // null key = original (chronological) order
+const POS_STR = new Set(['side', 'entry_dt', 'exit_dt']);
+
 function renderPositions(sym, positions) {
+  posCtx = {sym, positions};
+  posSort = {key: null, dir: 1};         // reset to original order for a new symbol
+  renderPosTable();
+}
+
+function renderPosTable() {
+  const {sym, positions} = posCtx;
   const box = $('positions');
   if (!positions.length) {
     box.innerHTML = `<div class="posempty">No positions for ${sym}.</div>`;
     return;
   }
   const dt = s => (s || '').slice(0, 19).replace('T', ' ');
-  const rows = positions.map((p, i) => {
-    const net = p.pnlcomm;
-    return `<tr>
+  // display order = original indices (into curPositions), optionally sorted
+  const order = positions.map((_, i) => i);
+  if (posSort.key === 'orig') order.sort((a, b) => (a - b) * posSort.dir);
+  else if (posSort.key) order.sort((a, b) =>
+    cmpVal(positions[a][posSort.key], positions[b][posSort.key]) * posSort.dir);
+
+  const rows = order.map(i => {
+    const p = positions[i], net = p.pnlcomm;
+    return `<tr data-i="${i}">
       <td><button class="jumpbtn" data-i="${i}" title="Jump to this trade on the chart">⤢</button></td>
-      <td>${i + 1}</td>
+      <td class="num">${i + 1}</td>
       <td><span class="side ${p.side === 'LONG' ? 'long' : 'short'}">${p.side}</span></td>
       <td>${dt(p.entry_dt)}</td>
       <td>${dt(p.exit_dt)}</td>
@@ -614,19 +899,34 @@ function renderPositions(sym, positions) {
     `<div class="poshead">
        <b>${sym}</b> — ${positions.length} position${positions.length > 1 ? 's' : ''}
        <span class="${total >= 0 ? 'pos' : 'neg'}">net ${fmt(total)} USDT</span>
-       <span class="note">click a row to highlight (click again to clear) · ⤢ jumps to it</span>
+       <span class="note">click a header to sort · click a row to highlight · ⤢ jumps to it</span>
      </div>
      <div class="posscroll"><table id="postbl">
-       <thead><tr><th></th><th>#</th><th>Side</th><th>Entry</th><th>Exit</th>
-         <th class="num">Entry px</th><th class="num">Exit px</th>
-         <th class="num">Size</th><th class="num">Bars</th>
-         <th class="num">Net PnL</th></tr></thead>
+       <thead><tr><th></th><th class="num" data-key="orig">#</th>
+         <th data-key="side">Side</th><th data-key="entry_dt">Entry</th>
+         <th data-key="exit_dt">Exit</th>
+         <th class="num" data-key="entry_price">Entry px</th>
+         <th class="num" data-key="exit_price">Exit px</th>
+         <th class="num" data-key="size">Size</th>
+         <th class="num" data-key="bars_held">Bars</th>
+         <th class="num" data-key="pnlcomm">Net PnL</th></tr></thead>
        <tbody>${rows}</tbody>
      </table></div>`;
-  box.querySelectorAll('#postbl tbody tr').forEach((tr, i) =>
-    tr.onclick = () => highlightPosition(i));
+  box.querySelectorAll('#postbl tbody tr').forEach(tr =>
+    tr.onclick = () => highlightPosition(+tr.dataset.i));
   box.querySelectorAll('.jumpbtn').forEach(btn =>
     btn.onclick = e => { e.stopPropagation(); jumpToPosition(+btn.dataset.i); });
+  box.querySelector('#postbl thead').onclick = e => {
+    const th = e.target.closest('th[data-key]');
+    if (!th) return;
+    const key = th.dataset.key;
+    posSort = {key, dir: posSort.key === key ? -posSort.dir
+                        : (POS_STR.has(key) || key === 'orig' ? 1 : -1)};
+    renderPosTable();
+  };
+  syncSort('#postbl', posSort);
+  if (selPos >= 0) box.querySelectorAll('#postbl tbody tr').forEach(tr =>
+    tr.classList.toggle('selrow', +tr.dataset.i === selPos));  // keep highlight
 }
 
 async function loadChart(sym) {
@@ -706,7 +1006,9 @@ const num = v => v == null ? '—' : fmt(v, 4);
 
 function renderAccount() {
   const s = R.summary || {};
+  const tf = ((R.params || {}).timeframe || '1m') === '1h' ? '1-hour' : '1-minute';
   const cards = [
+    ['Bars used', tf, null],
     ['End value', fmt(s.end_value) + ' USDT', null],
     ['PnL', fmt(s.pnl) + ' USDT', s.pnl],
     ['Return', fmt(s.return_pct, 3) + '%', s.return_pct],
@@ -783,13 +1085,24 @@ async function loadResults() {
   const r = await fetch('/api/results');
   if (!r.ok) { $('empty').hidden = false; return; }
   R = await r.json();
+  applyResults();
+}
+
+// Render whatever is in the global R (live run OR an archived load).
+function applyResults() {
   $('empty').hidden = true;
+  $('loadbanner').style.display = R.loaded_from ? 'inline-block' : 'none';
+  if (R.loaded_from)
+    $('loadbanner').textContent =
+      `📁 Loaded saved run "${R.loaded_from}" — PnL & positions only (no candle chart stored).`;
   const chip = t => `<span class="chip">${t}</span>`;
   // Params are whatever the selected strategy declared — render them generically.
   const P = R.params || {};
-  const hidden = new Set(['strategy', 'window_start', 'window_end', 'leverage']);
+  const hidden = new Set(['strategy', 'window_start', 'window_end', 'leverage', 'timeframe']);
+  const tfLabel = (P.timeframe || '1m') === '1h' ? '1-hour bars' : '1-minute bars';
   $('meta').innerHTML =
     (P.strategy ? chip(`<b>${P.strategy}</b>`) : '') +
+    chip(`📊 ${tfLabel}`) +
     Object.entries(P).filter(([k]) => !hidden.has(k))
                      .map(([k, v]) => chip(`${k.replace(/_/g, ' ')}: ${v}`)).join('') +
     chip(`generated ${R.generated.slice(0, 19).replace('T', ' ')}`);
@@ -858,9 +1171,52 @@ async function loadConfig() {
     .map(n => `<option value="${n}" ${n === CFG.default ? 'selected' : ''}>${n}</option>`)
     .join('');
   $('cfgdays').value = CFG.days;
+  const tf = CFG.timeframe || '1m';
+  if ($('cfgtf')) $('cfgtf').value = tf;
+  if ($('synctf')) $('synctf').value = tf;
+  if ($('reptf')) $('reptf').value = tf;
   renderParams();
+  updateSaveLabel();
 }
-$('cfgstrategy') && ($('cfgstrategy').onchange = renderParams);
+
+// Fill the panel: optionally switch strategy/timeframe, rebuild the param
+// fields, then override them with the values in P.
+function fillPanel(strategy, tf, P) {
+  if (!CFG) return;
+  if (strategy && CFG.strategies[strategy]) $('cfgstrategy').value = strategy;
+  if (tf && $('cfgtf')) $('cfgtf').value = tf;
+  renderParams();
+  updateSaveLabel();
+  const defs = CFG.strategies[$('cfgstrategy').value] || {};
+  for (const k of Object.keys(defs)) {
+    if (!(k in P)) continue;
+    const el = $('p_' + k);
+    if (!el) continue;
+    if (typeof defs[k] === 'boolean') el.checked = !!P[k];
+    else el.value = P[k];
+  }
+}
+
+// Seed the config panel from the LAST run's params so reopening (or reloading
+// the page) shows what you actually ran, not the server defaults.
+function syncConfigToLastRun() {
+  if (!R || !R.params) return;
+  fillPanel(R.params.strategy, R.params.timeframe, R.params);
+}
+
+// When the user PICKS a strategy/timeframe, apply their saved DEFAULT config
+// for that pair (if any) on top of the tuned defaults.
+function applySavedDefault() {
+  const sc = SAVEDCFG.find(c => c.default
+    && c.strategy === $('cfgstrategy').value && c.timeframe === $('cfgtf').value);
+  if (sc) fillPanel(null, null, sc.params);
+}
+
+function updateSaveLabel() {
+  if ($('cfgsave')) $('cfgsave').textContent = '💾 Save config (' + $('cfgtf').value + ')';
+}
+$('cfgstrategy') && ($('cfgstrategy').onchange = () => { renderParams(); applySavedDefault(); });
+$('cfgtf') && ($('cfgtf').onchange = () => { updateSaveLabel(); applySavedDefault(); });
 $('cfgbtn').onclick = () => {
   const p = $('cfgpanel');
   p.hidden = !p.hidden;
@@ -868,6 +1224,31 @@ $('cfgbtn').onclick = () => {
   if (!CFG && !p.hidden) loadConfig();
 };
 $('cfgreset').onclick = e => { e.preventDefault(); loadConfig(); };
+
+/* ---- reload strategy modules from disk (no backtest needed) ---- */
+$('reloadbtn').onclick = async () => {
+  $('reloadbtn').disabled = true;
+  $('repstatus').textContent = 'reloading…';
+  try {
+    const r = await fetch('/api/reload', {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      $('repstatus').textContent = 'reload failed: ' + (d.error || r.status);
+    } else {
+      CFG = null;
+      await loadConfig();                       // refresh picker + tuned defaults
+      if ($('repstrats').childElementCount) {   // report panel, if it was built
+        $('repstrats').innerHTML = ''; renderRepPanel();
+      }
+      $('repstatus').textContent = 'strategies reloaded ✓';
+      setTimeout(() => { if ($('repstatus').textContent === 'strategies reloaded ✓')
+        $('repstatus').textContent = ''; }, 3000);
+    }
+  } catch (e) {
+    $('repstatus').textContent = 'reload failed: ' + e;
+  }
+  $('reloadbtn').disabled = false;
+};
 
 function collectRunPayload() {
   if (!CFG) return {};                      // panel never loaded -> server defaults
@@ -879,7 +1260,8 @@ function collectRunPayload() {
     if (!el) continue;
     params[k] = (typeof d === 'boolean') ? el.checked : Number(el.value);
   }
-  return {strategy: name, days: Number($('cfgdays').value) || undefined, params};
+  return {strategy: name, days: Number($('cfgdays').value) || undefined,
+          timeframe: $('cfgtf') ? $('cfgtf').value : '1m', params};
 }
 
 $('runbtn').onclick = async () => {
@@ -896,53 +1278,84 @@ $('runbtn').onclick = async () => {
 };
 
 /* ---- run history browser ---- */
+let histRuns = [];
+let histSort = {key: 'id', dir: -1};   // newest run first by default
+const HIST_NUM = new Set(['id', 'days', 'pnl', 'return_pct', 'trades', 'win', 'sharpe', 'dd']);
+
+function histFields(run) {
+  const p = run.params || {}, s = run.summary || {};
+  const days = (p.window_start && p.window_end)
+    ? Math.round((Date.parse(p.window_end) - Date.parse(p.window_start)) / 864e5) : null;
+  return {run, id: run.id, generated: run.generated || '', strategy: p.strategy || '',
+          tf: p.timeframe || '1m',
+          days, pnl: s.pnl, return_pct: s.return_pct, trades: s.trades_closed,
+          win: s.win_rate_pct, sharpe: s.sharpe_arithmetic, dd: s.max_drawdown_pct};
+}
+
+function renderHistory() {
+  const body = $('histbody');
+  const q = ($('histfilter').value || '').toLowerCase().trim();
+  let rows = histRuns.map(histFields);
+  if (q) rows = rows.filter(r =>
+    (r.strategy + ' #' + r.id + ' ' + r.generated).toLowerCase().includes(q));
+  rows.sort((a, b) => cmpVal(a[histSort.key], b[histSort.key]) * histSort.dir);
+  syncSort('#histtbl', histSort);
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="11" class="note" style="padding:20px">${
+      histRuns.length ? 'no runs match the filter' : 'no runs recorded yet'}</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(r => `<tr data-id="${r.id}">
+      <td class="num">${r.id}</td>
+      <td>${r.generated.slice(0, 19).replace('T', ' ')}</td>
+      <td>${r.strategy || '—'}</td>
+      <td>${r.tf === '1h' ? '1h' : '1m'}</td>
+      <td class="num">${r.days == null ? '—' : r.days}</td>
+      <td class="num ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmt(r.pnl)}</td>
+      <td class="num">${r.return_pct == null ? '—' : fmt(r.return_pct, 3)}</td>
+      <td class="num">${r.trades ?? '—'}</td>
+      <td class="num">${r.win == null ? '—' : fmt(r.win, 1)}</td>
+      <td class="num ${r.sharpe >= 0 ? 'pos' : 'neg'}">${r.sharpe == null ? '—' : fmt(r.sharpe, 3)}</td>
+      <td class="num">${r.dd == null ? '—' : fmt(r.dd, 2)}</td>
+    </tr>`).join('');
+  const byId = Object.fromEntries(histRuns.map(x => [String(x.id), x]));
+  body.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => {
+    const open = tr.nextElementSibling?.classList.contains('histdetail');
+    body.querySelectorAll('tr.histdetail').forEach(x => x.remove());
+    if (open) return;
+    const run = byId[tr.dataset.id];
+    const skip = new Set(['strategy', 'window_start', 'window_end']);
+    const chips = Object.entries(run.params || {})
+      .filter(([k]) => !skip.has(k))
+      .map(([k, v]) => `<span class="chip">${k}: ${v}</span>`).join('') +
+      `<span class="chip">window: ${(run.params?.window_start || '').slice(0, 16)} →
+       ${(run.params?.window_end || '').slice(0, 16)}</span>`;
+    tr.insertAdjacentHTML('afterend',
+      `<tr class="histdetail"><td colspan="11">${chips}</td></tr>`);
+  });
+}
+
 async function loadHistory() {
   const body = $('histbody');
   try {
     const r = await fetch('/api/runs?limit=1000');
     if (!r.ok) throw new Error((await r.json()).error || r.status);
-    const runs = (await r.json()).runs || [];
-    if (!runs.length) { body.innerHTML =
-      '<tr><td colspan="9" class="note" style="padding:20px">no runs recorded yet</td></tr>'; return; }
-    body.innerHTML = runs.map(run => {
-      const p = run.params || {}, s = run.summary || {};
-      const days = p.window_start && p.window_end
-        ? Math.round((Date.parse(p.window_end) - Date.parse(p.window_start)) / 864e5)
-        : '—';
-      const pnl = s.pnl;
-      return `<tr data-id="${run.id}">
-        <td class="num">${run.id}</td>
-        <td>${(run.generated || '').slice(0, 19).replace('T', ' ')}</td>
-        <td>${p.strategy || '—'}</td>
-        <td class="num">${days}</td>
-        <td class="num ${pnl >= 0 ? 'pos' : 'neg'}">${fmt(pnl)}</td>
-        <td class="num">${s.return_pct == null ? '—' : fmt(s.return_pct, 3)}</td>
-        <td class="num">${s.trades_closed ?? '—'}</td>
-        <td class="num">${s.win_rate_pct == null ? '—' : fmt(s.win_rate_pct, 1)}</td>
-        <td class="num">${s.max_drawdown_pct == null ? '—' : fmt(s.max_drawdown_pct, 2)}</td>
-      </tr>`;
-    }).join('');
-    const byId = Object.fromEntries(runs.map(x => [String(x.id), x]));
-    body.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => {
-      const open = tr.nextElementSibling?.classList.contains('histdetail');
-      body.querySelectorAll('tr.histdetail').forEach(x => x.remove());
-      if (open) return;                     // toggle off
-      const run = byId[tr.dataset.id];
-      const skip = new Set(['strategy', 'window_start', 'window_end']);
-      const chips = Object.entries(run.params || {})
-        .filter(([k]) => !skip.has(k))
-        .map(([k, v]) => `<span class="chip">${k}: ${v}</span>`).join('') +
-        `<span class="chip">window: ${(run.params?.window_start || '').slice(0, 16)} →
-         ${(run.params?.window_end || '').slice(0, 16)}</span>`;
-      tr.insertAdjacentHTML('afterend',
-        `<tr class="histdetail"><td colspan="9">${chips}</td></tr>`);
-    });
+    histRuns = (await r.json()).runs || [];
+    renderHistory();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="9" class="note" style="padding:20px">
+    body.innerHTML = `<tr><td colspan="11" class="note" style="padding:20px">
       history unavailable: ${e.message || e}</td></tr>`;
   }
 }
 $('histrefresh').onclick = e => { e.preventDefault(); loadHistory(); };
+$('histfilter').oninput = renderHistory;
+$('histtbl').querySelector('thead').onclick = e => {
+  const th = e.target.closest('th[data-key]');
+  if (!th) return;
+  const key = th.dataset.key;
+  histSort = {key, dir: histSort.key === key ? -histSort.dir : (HIST_NUM.has(key) ? -1 : 1)};
+  renderHistory();
+};
 
 /* ---- incremental data sync (same routine launch.bat runs) ---- */
 let syncTimer = null;
@@ -965,16 +1378,214 @@ async function pollSync() {
 }
 $('syncbtn').onclick = async () => {
   const days = Number($('syncdays').value) || 180;
+  const interval = $('synctf') ? $('synctf').value : '1m';
   const r = await fetch('/api/sync', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({days}),
+    body: JSON.stringify({days, interval}),
   });
   if (r.ok || r.status === 409) {
     $('syncbtn').disabled = true;
     if (!syncTimer) syncTimer = setInterval(pollSync, 3000);
     pollSync();
   }
+};
+
+/* ---- data health: latest bar per symbol + integrity check ---- */
+const ageFmt = m => m == null ? '—'
+  : m < 90 ? Math.round(m) + ' min'
+  : m < 48 * 60 ? (m / 60).toFixed(1) + ' h'
+  : (m / 1440).toFixed(1) + ' d';
+
+async function fetchDataStatus() {
+  const interval = $('synctf').value;
+  const r = await fetch('/api/data/status?interval=' + encodeURIComponent(interval));
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || r.status);
+  return d;
+}
+
+function showDataStatus(html) {
+  const box = $('datastatus');
+  box.style.display = '';
+  box.innerHTML = html +
+    '<p class="note"><a href="#" onclick="this.closest(\'#datastatus\').style.display=\'none\';return false">close</a></p>';
+}
+
+$('latestbtn').onclick = async () => {
+  $('latestbtn').disabled = true;
+  try {
+    const d = await fetchDataStatus();
+    const rows = (d.symbols || []).slice()
+      .sort((a, b) => b.age_min - a.age_min);       // stalest first
+    showDataStatus(
+      `<p class="note">Latest stored <b>${d.interval}</b> bar per symbol
+       (${rows.length} symbols, checked ${d.generated} UTC) — stalest first.</p>
+       <table id="datatbl"><thead><tr><th class="num">#</th><th>Symbol</th>
+       <th>First bar (UTC) <span class="tinynote">(late = listed later)</span></th>
+       <th>Last bar (UTC)</th>
+       <th class="num">Age</th><th class="num">Bars</th></tr></thead><tbody>` +
+      rows.map((s, i) => `<tr><td class="num">${i + 1}</td><td>${s.symbol}</td>
+        <td>${s.first}</td><td>${s.last}</td>
+        <td class="num ${s.age_min > 1440 ? 'bad' : ''}">${ageFmt(s.age_min)}</td>
+        <td class="num">${s.bars.toLocaleString('en-US')}</td></tr>`).join('') +
+      '</tbody></table>');
+  } catch (e) {
+    showDataStatus(`<p class="note">data status failed: ${e.message || e}</p>`);
+  }
+  $('latestbtn').disabled = false;
+};
+
+$('integbtn').onclick = async () => {
+  $('integbtn').disabled = true;
+  try {
+    const d = await fetchDataStatus();
+    const syms = d.symbols || [];
+    const holed = syms.filter(s => s.missing > 0)
+                      .sort((a, b) => b.missing - a.missing);
+    const head = `<p class="note">Integrity of stored <b>${d.interval}</b> bars
+      (expected = continuous bars over each symbol's own span; crypto trades 24/7):
+      <b class="${holed.length ? 'neg' : 'pos'}">${syms.length - holed.length}/${syms.length}
+      symbols complete</b>${holed.length ? ', ' + holed.length + ' with holes:' : '.'}</p>`;
+    showDataStatus(head + (!holed.length ? '' :
+      `<table id="datatbl"><thead><tr><th>Symbol</th><th>First (UTC)</th><th>Last (UTC)</th>
+       <th class="num">Bars</th><th class="num">Expected</th><th class="num">Missing</th></tr></thead><tbody>` +
+      holed.map(s => `<tr><td>${s.symbol}</td><td>${s.first}</td><td>${s.last}</td>
+        <td class="num">${s.bars.toLocaleString('en-US')}</td>
+        <td class="num">${s.expected.toLocaleString('en-US')}</td>
+        <td class="num bad">${s.missing.toLocaleString('en-US')}</td></tr>`).join('') +
+      '</tbody></table>'));
+  } catch (e) {
+    showDataStatus(`<p class="note">integrity check failed: ${e.message || e}</p>`);
+  }
+  $('integbtn').disabled = false;
+};
+
+/* ---- floating server-log window ---- */
+let logLast = 0, logTimer = null;
+const LOG_ERR = /error|failed|traceback|exception|aborting/i;
+const LOG_WARN = /warning|note:|discarded|diverged|excluded|skipping/i;
+
+async function pollLogs() {
+  let d;
+  try {
+    d = await (await fetch('/api/logs?since=' + logLast)).json();
+  } catch (e) { return; }
+  const lines = d.lines || [];
+  if (!lines.length) return;
+  logLast = d.last || logLast;
+  const out = $('logout');
+  // stay pinned to the bottom only if the user hasn't scrolled up
+  const pinned = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  out.insertAdjacentHTML('beforeend', lines.map(l => {
+    const cls = LOG_ERR.test(l.line) ? 'lerr' : LOG_WARN.test(l.line) ? 'lwarn' : '';
+    return `<span class="lt">${l.t}</span> <span class="${cls}">${esc(l.line)}</span>\n`;
+  }).join(''));
+  // cap the DOM at ~4000 lines to match the server buffer
+  while (out.childElementCount > 8000) {
+    out.removeChild(out.firstChild); out.removeChild(out.firstChild);
+    if (out.firstChild && out.firstChild.nodeType === 3) out.removeChild(out.firstChild);
+  }
+  if (pinned) out.scrollTop = out.scrollHeight;
+}
+
+$('logbtn').onclick = () => {
+  const w = $('logwin');
+  w.hidden = !w.hidden;
+  $('logbtn').classList.toggle('open', !w.hidden);
+  if (!w.hidden) {
+    pollLogs();
+    if (!logTimer) logTimer = setInterval(pollLogs, 2000);
+  } else if (logTimer) {
+    clearInterval(logTimer); logTimer = null;
+  }
+};
+$('logclose').onclick = e => { e.preventDefault(); $('logbtn').onclick(); };
+$('logclear').onclick = e => { e.preventDefault(); $('logout').innerHTML = ''; };
+
+// drag by the title bar (switches from right/bottom- to left/top-anchoring)
+$('logwin-h').addEventListener('pointerdown', e => {
+  if (e.target.closest('a')) return;
+  const w = $('logwin'), r = w.getBoundingClientRect();
+  const dx = e.clientX - r.left, dy = e.clientY - r.top;
+  w.style.left = r.left + 'px'; w.style.top = r.top + 'px';
+  w.style.right = 'auto'; w.style.bottom = 'auto';
+  const move = ev => {
+    w.style.left = Math.max(0, Math.min(window.innerWidth - 80, ev.clientX - dx)) + 'px';
+    w.style.top = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - dy)) + 'px';
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+});
+
+/* ---- python console (persistent worker, notebook semantics) ---- */
+const conHist = [];
+let conHistIdx = -1;
+
+function conAppend(text, cls) {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text;
+  $('conout').appendChild(span);
+  $('conout').scrollTop = $('conout').scrollHeight;
+}
+
+async function conRun() {
+  const code = $('conin').value;
+  if (!code.trim()) return;
+  conHist.push(code); conHistIdx = conHist.length;
+  conAppend('>>> ' + code.replace(/\n/g, '\n... ') + '\n', 'cin');
+  $('conin').value = '';
+  $('conrun').disabled = true; $('conin').disabled = true;
+  try {
+    const r = await fetch('/api/console', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code}),
+    });
+    const d = await r.json();
+    if (d.error) conAppend(d.error + '\n', 'cerr');
+    else {
+      if (d.out) conAppend(d.out.endsWith('\n') ? d.out : d.out + '\n');
+      if (d.err) conAppend(d.err, 'cerr');
+    }
+  } catch (e) {
+    conAppend('request failed: ' + e + '\n', 'cerr');
+  }
+  $('conrun').disabled = false; $('conin').disabled = false;
+  $('conin').focus();
+}
+$('conrun').onclick = conRun;
+$('conin').onkeydown = e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); conRun(); }
+  else if (e.key === 'ArrowUp' && !$('conin').value.includes('\n')
+           && $('conin').selectionStart === 0 && conHist.length) {
+    e.preventDefault();
+    conHistIdx = Math.max(0, conHistIdx - 1);
+    $('conin').value = conHist[conHistIdx];
+  } else if (e.key === 'ArrowDown' && conHistIdx < conHist.length) {
+    if ($('conin').value === conHist[conHistIdx]) {
+      e.preventDefault();
+      conHistIdx += 1;
+      $('conin').value = conHist[conHistIdx] || '';
+    }
+  }
+};
+$('conrestart').onclick = async () => {
+  $('conrestart').disabled = true;
+  try {
+    const d = await (await fetch('/api/console/restart', {method: 'POST'})).json();
+    conAppend('--- kernel restarted ---\n', 'cerr');
+    if (d.out) conAppend(d.out + '\n');
+  } catch (e) {
+    conAppend('restart failed: ' + e + '\n', 'cerr');
+  }
+  $('conrestart').disabled = false;
 };
 
 /* ---- comparison report: pick strategies + params, then build ---- */
@@ -1000,7 +1611,14 @@ function renderRepPanel() {
   }).join('');
 }
 
+let repMode = 'new';   // 'new' = fresh strategies, 'old' = compare saved runs
+
 function collectReportPayload() {
+  if (repMode === 'old') {
+    const tags = [...document.querySelectorAll('#reptags input:checked')]
+      .map(cb => cb.value);
+    return {tags};
+  }
   const strategies = [];
   document.querySelectorAll('#repstrats details').forEach(det => {
     const name = det.dataset.name;
@@ -1013,9 +1631,35 @@ function collectReportPayload() {
     }
     strategies.push({name, params});
   });
-  return {symbol: ($('repsymbol').value || 'ETHUSDT').trim().toUpperCase(),
+  return {symbol: $('repsymbol').value.trim().toUpperCase() || null,   // empty -> all symbols
+          timeframe: $('reptf') ? $('reptf').value : '1m',
+          days: Number($('repdays').value) || null,                    // empty -> all data
           strategies};
 }
+
+async function renderRepTags() {
+  const box = $('reptags');
+  box.innerHTML = '<span class="note">loading saved runs…</span>';
+  let runs = [];
+  try { runs = (await (await fetch('/api/testruns')).json()).runs || []; }
+  catch (e) { box.innerHTML = '<span class="note">could not load saved runs</span>'; return; }
+  if (!runs.length) { box.innerHTML = '<span class="note">no saved runs yet</span>'; return; }
+  box.innerHTML = runs.map(r => {
+    const ret = r.return_pct == null ? '' : ` · ${fmt(r.return_pct, 2)}%`;
+    return `<label><input type="checkbox" value="${r.tag}">
+      <b>${r.strategy || '—'}</b> <span class="note">${r.timeframe || '1m'} ·
+      ${(r.generated || '').slice(0, 16).replace('T', ' ')}${ret}</span></label>`;
+  }).join('');
+}
+
+document.querySelectorAll('#reppanel .modetab').forEach(tab => tab.onclick = () => {
+  document.querySelectorAll('#reppanel .modetab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  repMode = tab.dataset.mode;
+  $('repnewbox').style.display = repMode === 'new' ? 'contents' : 'none';
+  $('repoldbox').style.display = repMode === 'old' ? 'block' : 'none';
+  if (repMode === 'old') renderRepTags();
+});
 
 function repLink() {
   $('repstatus').innerHTML = '<a href="/report/" target="_blank">open report ↗</a>';
@@ -1041,7 +1685,11 @@ $('repbtn').onclick = () => {
 };
 $('repbuild').onclick = async () => {
   const payload = collectReportPayload();
-  if (!payload.strategies.length) {
+  if (repMode === 'old') {
+    if (!payload.tags.length) {
+      $('repstatus').textContent = 'select at least one saved run'; return;
+    }
+  } else if (!payload.strategies.length) {
     $('repstatus').textContent = 'select at least one strategy'; return;
   }
   const r = await fetch('/api/report', {
@@ -1056,8 +1704,161 @@ $('repbuild').onclick = async () => {
   }
 };
 
-loadResults();
-loadConfig();
+/* ---- saved per-strategy/per-timeframe configs ---- */
+let SAVEDCFG = [];
+const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                              .replace(/"/g, '&quot;');
+
+async function cfgAction(payload) {
+  const r = await fetch('/api/configs', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)});
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || r.status);
+  SAVEDCFG = d.configs || [];
+  renderConfigsTab();
+}
+
+async function loadSavedConfigs() {
+  try {
+    SAVEDCFG = (await (await fetch('/api/configs')).json()).configs || [];
+  } catch (e) { SAVEDCFG = []; }
+  renderConfigsTab();
+}
+
+function renderConfigsTab() {
+  const body = $('cfgsbody');
+  if (!body) return;
+  if (!SAVEDCFG.length) {
+    body.innerHTML = `<tr><td colspan="8" class="note" style="padding:20px">
+      no saved configs yet — set up the ⚙ Config panel and press 💾 Save config</td></tr>`;
+    return;
+  }
+  const rows = SAVEDCFG.slice().sort((a, b) =>
+    (a.strategy + a.timeframe).localeCompare(b.strategy + b.timeframe)
+    || (b.saved || '').localeCompare(a.saved || ''));
+  body.innerHTML = rows.map(c => {
+    const chips = Object.entries(c.params || {})
+      .map(([k, v]) => `<span class="chip">${escHtml(k)}: ${escHtml(v)}</span>`).join('');
+    return `<tr>
+      <td style="text-align:center"><input type="radio"
+        name="def_${escHtml(c.strategy)}_${c.timeframe}" data-act="default"
+        data-id="${escHtml(c.id)}" ${c.default ? 'checked' : ''}
+        title="use this config when ${escHtml(c.strategy)} + ${c.timeframe} is selected"></td>
+      <td>${escHtml(c.strategy)}</td>
+      <td>${c.timeframe}</td>
+      <td><b>${escHtml(c.name)}</b></td>
+      <td>${(c.saved || '').slice(0, 16).replace('T', ' ')}</td>
+      <td class="cfgchips">${chips}</td>
+      <td><textarea class="cfgnotes" data-id="${escHtml(c.id)}" rows="2"
+        placeholder="notes…">${escHtml(c.notes || '')}</textarea></td>
+      <td style="white-space:nowrap">
+        <button class="ghostbtn" data-act="load" data-id="${escHtml(c.id)}"
+          title="put this config into the ⚙ Config panel">Load</button>
+        <button class="ghostbtn" data-act="del" data-id="${escHtml(c.id)}"
+          title="delete this config">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  const err = e => { $('histnote') && console.error(e); alert('config action failed: ' + (e.message || e)); };
+  body.querySelectorAll('input[data-act="default"]').forEach(el =>
+    el.onchange = () => cfgAction({action: 'default', id: el.dataset.id}).catch(err));
+  body.querySelectorAll('.cfgnotes').forEach(el =>
+    el.onchange = () => cfgAction({action: 'notes', id: el.dataset.id,
+                                   notes: el.value}).catch(err));
+  body.querySelectorAll('button[data-act="del"]').forEach(el =>
+    el.onclick = () => {
+      const c = SAVEDCFG.find(x => x.id === el.dataset.id);
+      if (confirm(`Delete saved config "${c ? c.name : el.dataset.id}"?`))
+        cfgAction({action: 'delete', id: el.dataset.id}).catch(err);
+    });
+  body.querySelectorAll('button[data-act="load"]').forEach(el =>
+    el.onclick = async () => {
+      const c = SAVEDCFG.find(x => x.id === el.dataset.id);
+      if (!c) return;
+      if (!CFG) await loadConfig();
+      fillPanel(c.strategy, c.timeframe, c.params);
+      const p = $('cfgpanel');
+      if (p.hidden) { p.hidden = false; $('cfgbtn').classList.add('open'); }
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    });
+}
+
+$('cfgsave').onclick = async () => {
+  if (!CFG) { $('cfgsavestatus').textContent = 'open the panel first'; return; }
+  const payload = collectRunPayload();
+  const name = $('cfgsavename').value.trim();
+  $('cfgsave').disabled = true;
+  try {
+    await cfgAction({action: 'save', strategy: payload.strategy,
+                     timeframe: payload.timeframe, params: payload.params, name});
+    $('cfgsavename').value = '';
+    $('cfgsavestatus').textContent = 'saved ✓ (see Configs tab)';
+    setTimeout(() => { if ($('cfgsavestatus').textContent.startsWith('saved'))
+      $('cfgsavestatus').textContent = ''; }, 3000);
+  } catch (e) {
+    $('cfgsavestatus').textContent = 'save failed: ' + (e.message || e);
+  }
+  $('cfgsave').disabled = false;
+};
+$('cfgsrefresh').onclick = e => { e.preventDefault(); loadSavedConfigs(); };
+
+/* ---- load a saved backtest (PnL + positions from its archive folder) ---- */
+async function renderLoadList() {
+  const body = $('loadbody');
+  body.innerHTML = '<tr><td colspan="8" class="note" style="padding:20px">loading…</td></tr>';
+  let runs = [];
+  try { runs = (await (await fetch('/api/testruns')).json()).runs || []; }
+  catch (e) {
+    body.innerHTML = `<tr><td colspan="8" class="note" style="padding:20px">
+      could not load saved runs: ${e.message || e}</td></tr>`; return;
+  }
+  if (!runs.length) {
+    body.innerHTML = '<tr><td colspan="8" class="note" style="padding:20px">no saved runs found</td></tr>';
+    return;
+  }
+  body.innerHTML = runs.map(r => `<tr data-tag="${r.tag}">
+      <td><button class="ghostbtn" data-tag="${r.tag}">Load</button></td>
+      <td>${(r.generated || '').slice(0, 19).replace('T', ' ')}</td>
+      <td>${r.strategy || '—'}</td>
+      <td>${r.timeframe || '1m'}</td>
+      <td class="num ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmt(r.pnl)}</td>
+      <td class="num">${r.return_pct == null ? '—' : fmt(r.return_pct, 3)}</td>
+      <td class="num">${r.trades ?? '—'}</td>
+      <td class="num">${Array.isArray(r.symbols) ? r.symbols.length : (r.symbols ?? '—')}</td>
+    </tr>`).join('');
+  body.querySelectorAll('button[data-tag]').forEach(b =>
+    b.onclick = () => loadSavedRun(b.dataset.tag));
+}
+
+async function loadSavedRun(tag) {
+  try {
+    const r = await fetch('/api/testrun/' + encodeURIComponent(tag));
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    R = await r.json();
+    selected = null;
+    applyResults();
+    $('loadpanel').hidden = true;
+    $('loadbtn').classList.remove('open');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  } catch (e) {
+    alert('load failed: ' + (e.message || e));
+  }
+}
+
+$('loadbtn').onclick = () => {
+  const p = $('loadpanel');
+  p.hidden = !p.hidden;
+  $('loadbtn').classList.toggle('open', !p.hidden);
+  if (!p.hidden) renderLoadList();
+};
+$('loadrefresh').onclick = e => { e.preventDefault(); renderLoadList(); };
+$('loadlive').onclick = e => { e.preventDefault(); selected = null; loadResults();
+  $('loadpanel').hidden = true; $('loadbtn').classList.remove('open'); };
+
+// Load config + last results, then seed the panel with the last run's params.
+Promise.all([loadConfig(), loadResults()]).then(syncConfigToLastRun);
+loadSavedConfigs();   // so saved DEFAULT configs apply on strategy/tf change
 fetch('/api/report/status').then(r => r.json())
   .then(st => { if (st.state === 'building') { $('repbuild').disabled = true;
                   repTimer = setInterval(pollReport, 3000); }

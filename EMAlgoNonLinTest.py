@@ -278,11 +278,35 @@ class EMNonLinTest(PortfolioStrategy):
         ('q_vel', 0.1e-6),      #   EM re-learns Q, R, d after warmup
         ('q_acc', 0.1e-9),
         ('d0', 0.0),            # initial drag coefficient
-        ('d_max', 1e6),         # clamp for the learned drag (>=0 enforced)
-        ('reversion', False),   # True: fade the deviation; False: follow it
+        ('d_max', 0.5),         # clamp for the learned drag (>=0 enforced).
+                                 # Drag linearizes to complex eigenvalues
+                                 # 1±i·sqrt(2d|v|/z): any d>0 makes the pred
+                                 # RING around price, amplitude ~sqrt(d).
+                                 # 1h sweep: 0.5 -> Sharpe 2.34 vs 1.69 at 5;
+                                 # d=0 kills the ringing AND the edge (+6k).
+        ('reversion', True),    # True: fade the deviation (default — the
+                                 # prediction LAGS price, so band breaks mark
+                                 # overextension); False: follow it
         ('em_window', 720),     # bars of rolling history the EM refit uses
         ('em_interval', 1440),  # refit every this many bars
-        ('em_iters', 3),        # outer EM iterations per refit
+        ('em_iters', 2),        # outer EM iterations per refit. Sweep: 2 keeps
+                                 # the worst prediction bounded (~18x) vs 1e15+
+                                 # at 3 -- the 3rd iter overfits drag unstable.
+        ('pred_max_dev', 0.5),  # reject a one-step prediction that deviates
+                                 # more than this fraction from the last price
+                                 # (the finite -20M spike the S>0 check misses).
+                                 # 0 disables. Triggers a self-heal re-warm.
+        ('dead', 0),            # bars AFTER warmup to keep filtering but not
+                                 # trade -- gives the EKF/drag time to settle
+                                 # before signals are trusted. 0 = disabled.
+        ('max_hold', 0),        # time stop: flatten any position still open
+                                 # after this many bars. A reversion that hasn't
+                                 # reverted by then is a failed trade (replay on
+                                 # 1h: 336 bars/14d -> +42%% pnl, kills the
+                                 # multi-week zombie trades). 0 = disabled.
+        ('long_only', False),   # suppress short ENTRIES (fade-the-pump shorts
+                                 # earned ~0 over 918 trades at 2x the risk);
+                                 # a short signal still CLOSES an open long.
     )
 
     def setup(self):
@@ -294,7 +318,9 @@ class EMNonLinTest(PortfolioStrategy):
                           'Q': None, 'R': None, 'd': float(self.params.d0),
                           'z_prev': None,
                           'pbuf': deque(maxlen=self.params.em_window),
-                          'bars_since_em': 0}
+                          'bars_since_em': 0, 'bars_since_ready': 0,
+                          'bars_since_reseed': 0, 'bars_in_pos': 0,
+                          'pos_sign': 0}
             self._chart[d._name] = []
 
     def _init_filter(self, st):
@@ -333,6 +359,17 @@ class EMNonLinTest(PortfolioStrategy):
                    and np.isfinite(x_last).all()
                    and np.isfinite(r) and np.isfinite(drag)
                    and (not ll or np.isfinite(ll[-1])))
+        
+        recent_range = max(prices) - min(prices)
+        max_plausible_v = recent_range  # velocity shouldn't exceed the window's whole price range per bar, generously
+        plausible = (abs(x_last[1, 0]) < max_plausible_v * 10       # generous slack, tune this
+                    and abs(x_last[2, 0]) < max_plausible_v * 10
+                    and abs(drag) < self.params.d_max)
+        
+
+
+        healthy = healthy and plausible
+
         if not healthy:
             self.log('%s EEM refit DISCARDED (non-finite result) — keeping '
                      'previous Q/R/d' % d._name, doprint=True)
@@ -347,6 +384,23 @@ class EMNonLinTest(PortfolioStrategy):
         st['X'], st['P'] = x_last, P_last
         st['z_prev'] = float(prices[-1])
 
+    def _reseed_state(self, st):
+        """State-only self-heal: re-init X/P from the recent price buffer while
+        KEEPING the learned Q/R/d (a divergence corrupts the state, not the
+        parameters). Returns False when there isn't enough recent history —
+        the caller then falls back to a full re-warm."""
+        buf = np.array(list(st['pbuf'])[-self.params.warmup:], dtype=float)
+        if len(buf) < self.params.warmup:
+            return False
+        idx = np.arange(len(buf))
+        c2, c1, _c0 = np.polyfit(idx, buf, 2)
+        n = len(buf) - 1
+        st['X'] = np.array([[buf[-1]], [2.0 * c2 * n + c1], [2.0 * c2]])
+        R = float(st['R'])
+        st['P'] = np.diag([R, R, R]).astype(float)
+        st['z_prev'] = float(buf[-1])
+        return True
+
     def _step(self, st, price):
         x, P, y_pred, innov, S = _ekf_step_one(
             st['X'], st['P'], price, st['z_prev'],
@@ -358,6 +412,13 @@ class EMNonLinTest(PortfolioStrategy):
         if not (np.isfinite(S) and S > 0.0
                 and np.isfinite(innov) and np.isfinite(x).all()):
             return None
+        # Hard plausibility guard: the drag dynamics can stay finite/PSD yet
+        # emit a wildly-off one-step forecast (the -20M spike). A prediction
+        # more than pred_max_dev away from the last price one bar ahead is
+        # never real -- treat it like a divergence and self-heal.
+        pmd = self.params.pred_max_dev
+        if pmd and price and abs(y_pred / price - 1.0) > pmd:
+            return None
         st['X'], st['P'] = x, P
         st['z_prev'] = float(price)
         return float(innov), float(S), float(y_pred)
@@ -365,14 +426,36 @@ class EMNonLinTest(PortfolioStrategy):
     def on_bar(self, d, price):
         st = self.kf[d]
 
+        # ---- time stop: count bars in the CURRENT trade regardless of filter
+        # state (a position can sit open through a re-warm). The clock resets
+        # when the position flips sign — a reversal is a new trade, otherwise
+        # chained flips would accumulate and flatten a young position (bug
+        # found 2026-07-16: a 72-bar short got flattened because exposure had
+        # been continuous for 336 bars across many flips). Once overdue, every
+        # early-return path below flattens instead of holding.
+        overdue = False
+        pos = self.getposition(d).size
+        sign = 1 if pos > 0 else (-1 if pos < 0 else 0)
+        if sign != st.get('pos_sign', 0):
+            st['bars_in_pos'] = 0            # flat->open, open->flat, or flip
+        st['pos_sign'] = sign
+        if sign != 0:
+            st['bars_in_pos'] += 1
+            if self.params.max_hold and st['bars_in_pos'] >= self.params.max_hold:
+                overdue = True
+                if st['bars_in_pos'] == self.params.max_hold:
+                    self.log('%s max_hold %d bars reached -> flatten'
+                             % (d._name, self.params.max_hold))
+
         if not st['ready']:
             st['warm'].append(price)
             if len(st['warm']) >= self.params.warmup:
                 self._init_filter(st)
-            return 0
+            return (0, 0) if overdue else 0
 
         st['pbuf'].append(price)
         st['bars_since_em'] += 1
+        st['bars_since_reseed'] += 1
         if (st['bars_since_em'] >= self.params.em_interval
                 and len(st['pbuf']) >= self.params.em_window):
             self._refit_em(d, st)
@@ -380,25 +463,52 @@ class EMNonLinTest(PortfolioStrategy):
 
         step = self._step(st, price)
         if step is None:
-            # Filter state corrupted (indefinite covariance) — re-warm this
-            # symbol's filter from scratch; the drag resets to d0 and EM will
-            # relearn it at the next refit.
-            self.log('%s filter diverged — re-warming from scratch'
-                     % d._name, doprint=True)
-            st.update(ready=False, warm=[], d=float(self.params.d0),
-                      bars_since_em=0)
-            return 0
+            # Filter state corrupted (indefinite covariance / implausible
+            # prediction). The learned Q/R/d are usually still fine — it's the
+            # state X/P that broke — so first try a state-only re-seed from the
+            # recent price buffer and resume next bar (no 180-bar blackout).
+            # If we re-diverge within `warmup` bars of a re-seed the PARAMETERS
+            # themselves are sick: fall back to the full re-warm, which resets
+            # the drag to d0 and lets EM relearn everything.
+            if (st['bars_since_reseed'] >= self.params.warmup
+                    and self._reseed_state(st)):
+                st['bars_since_reseed'] = 0
+                self.log('%s filter diverged — state re-seeded (kept Q/R/d)'
+                         % d._name, doprint=True)
+            else:
+                self.log('%s filter diverged — re-warming from scratch'
+                         % d._name, doprint=True)
+                st.update(ready=False, warm=[], d=float(self.params.d0),
+                          bars_since_em=0, bars_since_ready=0,
+                          bars_since_reseed=0)
+            return (0, 0) if overdue else 0
         innov, S, y_pred = step
         band = self.params.k * (S ** 0.5)
         self._chart[d._name].append((self.bar_epoch(d), round(y_pred, 8),
                                      round(y_pred + band, 8),
                                      round(y_pred - band, 8)))
         self._diag_record(d, price, y_pred, innov, S, band, st)
+
+        # "dead" period: keep filtering/EM-fitting (already done above) but
+        # suppress trade signals for the first `dead` bars after warmup ends,
+        # so the EKF/drag estimate has time to settle before it's trusted.
+        st['bars_since_ready'] += 1
+        if st['bars_since_ready'] <= self.params.dead:
+            return (0, 0) if overdue else 0
+
+        if overdue:
+            return (0, 0)
+
         if band <= 0:
             return 0
 
-        long_sig = innov < -band
-        short_sig = innov > band
+        # innov = price - prediction. FOLLOW (reversion=False): trade in the
+        # direction of the surprise (price broke ABOVE the band -> LONG).
+        # REVERSION (reversion=True): fade it (price above prediction -> SHORT,
+        # betting it comes back). NOTE: before 2026-07-16 these were swapped —
+        # reversion=False actually faded — so old results used the OTHER mode.
+        long_sig = innov > band
+        short_sig = innov < -band
 
         if self.params.reversion:
             long_sig, short_sig = short_sig, long_sig
@@ -408,13 +518,21 @@ class EMNonLinTest(PortfolioStrategy):
         if long_sig:
             if pos_size > 0:
                 return 0
-            self.log('%s breakout ABOVE +band (innov %.6f, band %.6f) -> LONG'
+            self.log('%s innov ABOVE +band (innov %.6f, band %.6f) -> LONG'
                      % (d._name, innov, band))
             return 1
         if short_sig:
+            if self.params.long_only:
+                # No short ENTRIES — but the opposite signal still closes an
+                # open long (otherwise longs would only exit via max_hold).
+                if pos_size > 0:
+                    self.log('%s short signal -> flatten long (long_only)'
+                             % d._name)
+                    return (0, 0)
+                return 0
             if pos_size < 0:
                 return 0
-            self.log('%s breakdown BELOW -band (innov %.6f, band %.6f) -> SHORT'
+            self.log('%s innov BELOW -band (innov %.6f, band %.6f) -> SHORT'
                      % (d._name, innov, band))
             return -1
 

@@ -18,8 +18,33 @@ DB = {
 }
 DB_NAME = os.getenv('PGDATABASE', 'backtest')
 
+# Hourly bars live in their own table (bars_1h) rather than an `interval`
+# column on `bars`, so the existing 26M-row minute table needs no PK
+# migration and 1h/1m never collide on a shared (symbol, ts) key.
+_INTERVAL_TABLE = {'1m': 'bars', '1h': 'bars_1h'}
+
+
+def _bars_table(interval):
+    try:
+        return _INTERVAL_TABLE[interval or '1m']
+    except KeyError:
+        raise ValueError('unsupported interval %r (want one of %s)'
+                         % (interval, list(_INTERVAL_TABLE)))
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
+    symbol  text             NOT NULL,
+    ts      timestamptz      NOT NULL,
+    open    double precision NOT NULL,
+    high    double precision NOT NULL,
+    low     double precision NOT NULL,
+    close   double precision NOT NULL,
+    volume  double precision NOT NULL,
+    PRIMARY KEY (symbol, ts)
+);
+
+CREATE TABLE IF NOT EXISTS bars_1h (
     symbol  text             NOT NULL,
     ts      timestamptz      NOT NULL,
     open    double precision NOT NULL,
@@ -103,7 +128,7 @@ def init_schema(conn):
         conn.commit()
 
         if timescale:
-            for table, col in (('bars', 'ts'), ('equity', 'ts')):
+            for table, col in (('bars', 'ts'), ('bars_1h', 'ts'), ('equity', 'ts')):
                 try:
                     cur.execute(
                         "SELECT create_hypertable(%s, %s, "
@@ -142,30 +167,43 @@ def load_bars_csv(conn, symbol, csv_path):
     return len(rows)
 
 
-def symbols(conn):
+def symbols(conn, interval='1m'):
+    tbl = _bars_table(interval)
     with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT symbol FROM bars ORDER BY symbol")
+        cur.execute("SELECT DISTINCT symbol FROM %s ORDER BY symbol" % tbl)
         return [r[0] for r in cur.fetchall()]
 
 
-def bars_span(conn):
-    """(min_ts, max_ts) across all stored bars."""
+def bars_span(conn, interval='1m'):
+    """(min_ts, max_ts) across all stored bars of this interval."""
+    tbl = _bars_table(interval)
     with conn.cursor() as cur:
-        cur.execute("SELECT min(ts), max(ts) FROM bars")
+        cur.execute("SELECT min(ts), max(ts) FROM %s" % tbl)
         return cur.fetchone()
 
 
-def coverage(conn, symbol, start, end):
+def per_symbol_span(conn, interval='1m'):
+    """[(symbol, min_ts, max_ts, count)] for every symbol stored at `interval`.
+    One GROUP BY pass — powers the dashboard's latest-bar / integrity views."""
+    tbl = _bars_table(interval)
+    with conn.cursor() as cur:
+        cur.execute("SELECT symbol, min(ts), max(ts), count(*) FROM %s "
+                    "GROUP BY symbol ORDER BY symbol" % tbl)
+        return cur.fetchall()
+
+
+def coverage(conn, symbol, start, end, interval='1m'):
     """(min_ts, max_ts, count) of stored bars for symbol within [start, end]."""
+    tbl = _bars_table(interval)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT min(ts), max(ts), count(*) FROM bars "
-            "WHERE symbol=%s AND ts >= %s AND ts <= %s",
+            "SELECT min(ts), max(ts), count(*) FROM %s "
+            "WHERE symbol=%%s AND ts >= %%s AND ts <= %%s" % tbl,
             (symbol, start, end))
         return cur.fetchone()
 
 
-def insert_bars(conn, symbol, rows):
+def insert_bars(conn, symbol, rows, interval='1m'):
     """Upsert (ts, o, h, l, c, v) rows; refetched candles overwrite partials.
 
     Timestamps are canonicalized to the minute-aligned close (:59.999, the
@@ -175,13 +213,14 @@ def insert_bars(conn, symbol, rows):
     """
     if not rows:
         return 0
+    tbl = _bars_table(interval)
     with conn.cursor() as cur:
         execute_values(
             cur,
-            "INSERT INTO bars (symbol, ts, open, high, low, close, volume) "
-            "VALUES %s ON CONFLICT (symbol, ts) DO UPDATE SET "
+            "INSERT INTO %s (symbol, ts, open, high, low, close, volume) "
+            "VALUES %%s ON CONFLICT (symbol, ts) DO UPDATE SET "
             "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-            "close=EXCLUDED.close, volume=EXCLUDED.volume",
+            "close=EXCLUDED.close, volume=EXCLUDED.volume" % tbl,
             [(symbol, r[0].replace(second=59, microsecond=999000)) + tuple(r[1:])
              for r in rows], page_size=10000)
     conn.commit()
@@ -189,12 +228,13 @@ def insert_bars(conn, symbol, rows):
 
 
 def export_bars_csv(conn, symbol, start, end, path,
-                    dt_format='%Y-%m-%d %H:%M:%S'):
+                    dt_format='%Y-%m-%d %H:%M:%S', interval='1m'):
     """Write one symbol's bars in [start, end] to a backtrader-ready CSV."""
+    tbl = _bars_table(interval)
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT ts, open, high, low, close, volume FROM bars "
-            "WHERE symbol=%s AND ts >= %s AND ts <= %s ORDER BY ts",
+            "SELECT ts, open, high, low, close, volume FROM %s "
+            "WHERE symbol=%%s AND ts >= %%s AND ts <= %%s ORDER BY ts" % tbl,
             (symbol, start, end))
         rows = cur.fetchall()
     if not rows:

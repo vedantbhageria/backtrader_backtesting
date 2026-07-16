@@ -1,0 +1,2 @@
+side,size,entry_signal_dt,entry_dt,exit_signal_dt,exit_dt,entry_price,exit_price,bars_held,pnl,pnlcomm
+SHORT,19835.366458395318,2026-02-25T14:59:59,2026-02-25T15:59:59,2026-06-24T15:59:59,2026-06-24T16:59:59,0.10082,0.07473,2857,517.504711,516.808291

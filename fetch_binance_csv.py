@@ -60,7 +60,7 @@ SYMBOLS = [
 # Start-Service postgresql-x64-18
 
 
-def _fetch_klines(symbol, start_ms, end_ms):
+def _fetch_klines(symbol, start_ms, end_ms, interval="1m"):
     out = []
     cur = start_ms
     sess = _session()
@@ -71,7 +71,7 @@ def _fetch_klines(symbol, start_ms, end_ms):
         for attempt in range(6):
             try:
                 resp = sess.get(FAPI_KLINES, params={
-                    "symbol": symbol, "interval": "1m",
+                    "symbol": symbol, "interval": interval,
                     "startTime": cur, "endTime": end_ms, "limit": 1500,
                 }, timeout=20)
                 if resp.status_code in (429, 418):
@@ -127,28 +127,30 @@ def _ms_to_dt(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
-def _missing_ranges(cov, start_ms, end_ms):
+def _missing_ranges(cov, start_ms, end_ms, interval='1m'):
     """Which [start_ms, end_ms] sub-ranges are absent from the database.
 
     cov is (min_ts, max_ts, count) from db.coverage(). Head/tail gaps are
     fetched individually; if the interior has holes (count < expected) the
     whole window is refetched — the upsert dedups. The tail range starts one
     bar early so a previously stored partial (still-forming) candle gets
-    overwritten with its final values.
+    overwritten with its final values. `interval` sets the bar spacing the
+    expected-count / gap checks assume (1m -> 60s, 1h -> 3600s).
     """
+    bar_ms = 3_600_000 if interval == '1h' else 60_000
     mn, mx, cnt = cov
     if mn is None:
         return [(start_ms, end_ms)]
     mn_ms = int(mn.timestamp() * 1000)
     mx_ms = int(mx.timestamp() * 1000)
-    expected = (mx_ms - mn_ms) // 60_000 + 1
+    expected = (mx_ms - mn_ms) // bar_ms + 1
     if cnt < expected:
         return [(start_ms, end_ms)]
     out = []
-    if mn_ms - start_ms > 60_000:
+    if mn_ms - start_ms > bar_ms:
         out.append((start_ms, mn_ms - 1))
-    if end_ms - mx_ms > 60_000:
-        out.append((mx_ms - 60_000, end_ms))
+    if end_ms - mx_ms > bar_ms:
+        out.append((mx_ms - bar_ms, end_ms))
     return out
 
 
@@ -232,11 +234,11 @@ def _plan_range(s_ms, e_ms, now_ms):
     return months, days, rest
 
 
-def _download(symbol, ranges, now_ms):
+def _download(symbol, ranges, now_ms, interval="1m"):
     """Fetch the missing ranges -> rows for db.insert_bars().
 
     Bulk history via data.binance.vision ZIPs (fast, no rate limit); today's
-    tail via the REST klines endpoint.
+    tail via the REST klines endpoint. `interval` is '1m' or '1h'.
     """
     today0 = (now_ms // DAY_MS) * DAY_MS
     rows = []
@@ -245,8 +247,8 @@ def _download(symbol, ranges, now_ms):
         rest = list(rest)
         for (y, m) in months:
             content = _vision_get(
-                "%s/monthly/klines/%s/1m/%s-1m-%04d-%02d.zip"
-                % (VISION_BASE, symbol, symbol, y, m))
+                "%s/monthly/klines/%s/%s/%s-%s-%04d-%02d.zip"
+                % (VISION_BASE, symbol, interval, symbol, interval, y, m))
             if content is None:
                 # Monthly not published (or listed mid-month): use dailies.
                 days.extend(_month_days(y, m, today0))
@@ -254,8 +256,8 @@ def _download(symbol, ranges, now_ms):
                 rows.extend(_zip_rows(content, now_ms))
         for day in days:
             content = _vision_get(
-                "%s/daily/klines/%s/1m/%s-1m-%s.zip"
-                % (VISION_BASE, symbol, symbol, day.isoformat()))
+                "%s/daily/klines/%s/%s/%s-%s-%s.zip"
+                % (VISION_BASE, symbol, interval, symbol, interval, day.isoformat()))
             if content is not None:
                 rows.extend(_zip_rows(content, now_ms))
             else:
@@ -266,7 +268,7 @@ def _download(symbol, ranges, now_ms):
                                   tzinfo=timezone.utc).timestamp() * 1000)
                 rest.append((d0, min(d0 + DAY_MS - 1, now_ms)))
         for rs, re_ in rest:
-            for k in _fetch_klines(symbol, rs, re_):
+            for k in _fetch_klines(symbol, rs, re_, interval):
                 close_ms = int(k[6])
                 if close_ms > now_ms:          # drop the still-forming candle
                     continue
@@ -275,12 +277,13 @@ def _download(symbol, ranges, now_ms):
     return rows
 
 
-def main(days=180):
+def main(days=180, interval='1m'):
     """Incremental sync of the last `days` days into postgres: asks the DB
     what's already stored, downloads only the missing ranges, upserts (the
     same logic launch.bat runs; the dashboard's Sync button calls this with
     a user-chosen day count). Returns a small stats dict."""
     days = max(1, int(days))
+    interval = interval if interval in ('1m', '1h') else '1m'
     started = time.time()
     now = datetime.now(timezone.utc)
     end_ms = int(now.timestamp() * 1000)
@@ -309,19 +312,19 @@ def main(days=180):
             for fut in as_completed(futures):
                 fut.result()
         print("Done (no DB) in %.1fs" % (time.time() - started))
-        return {'db': False, 'days': days,
+        return {'db': False, 'days': days, 'interval': interval,
                 'elapsed': round(time.time() - started, 1)}
 
     # 1) Ask the database what's already there; compute only the gaps.
     need = {}
     for s in SYMBOLS:
         sym = s.upper()
-        ranges = _missing_ranges(db.coverage(conn, sym, start_dt, end_dt),
-                                 start_ms, end_ms)
+        ranges = _missing_ranges(db.coverage(conn, sym, start_dt, end_dt, interval),
+                                 start_ms, end_ms, interval)
         if ranges:
             need[sym] = ranges
-    print("%d/%d symbols need downloading (rest already in postgres)"
-          % (len(need), len(SYMBOLS)))
+    print("[%s] %d/%d symbols need downloading (rest already in postgres)"
+          % (interval, len(need), len(SYMBOLS)))
 
     # 2) Download the missing ranges in parallel, upserting each symbol into
     #    postgres AS SOON AS it finishes — interrupting the fetch (Ctrl+C)
@@ -330,13 +333,13 @@ def main(days=180):
     new_bars, done = 0, 0
     if need:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_download, sym, ranges, end_ms): sym
+            futures = {pool.submit(_download, sym, ranges, end_ms, interval): sym
                        for sym, ranges in need.items()}
             for fut in as_completed(futures):
                 sym = futures[fut]
                 done += 1
                 try:
-                    n = db.insert_bars(conn, sym, fut.result())
+                    n = db.insert_bars(conn, sym, fut.result(), interval)
                     new_bars += n
                     print("  [%d/%d] %s: +%d bars" % (done, len(need), sym, n))
                 except Exception as e:
@@ -346,7 +349,7 @@ def main(days=180):
     # from postgres right before each run.
     print("Inserted/updated %d bars in postgres in %.1fs"
           % (new_bars, time.time() - started))
-    return {'db': True, 'days': days, 'symbols_needed': len(need),
+    return {'db': True, 'days': days, 'interval': interval, 'symbols_needed': len(need),
             'symbols_total': len(SYMBOLS), 'new_bars': new_bars,
             'elapsed': round(time.time() - started, 1)}
 
