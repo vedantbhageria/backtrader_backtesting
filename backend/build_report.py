@@ -430,11 +430,27 @@ def _render_page(results, subtitle):
     span = '%s → %s' % (ref.index[0].strftime('%Y-%m-%d'),
                         ref.index[-1].strftime('%Y-%m-%d'))
 
-    cfg_lines = ''.join(
-        '<p class="note"><b>%s</b> · %s</p>' % (
-            r['name'],
-            ', '.join('%s=%s' % (k, v) for k, v in sorted(r.get('params', {}).items())))
-        for r in results)
+    # parameters as a proper comparison table (param rows x run columns);
+    # cells where runs differ are highlighted
+    _skip = {'window_start', 'window_end'}
+    keys = sorted({k for r in results for k in (r.get('params') or {})} - _skip)
+    if keys:
+        head = ''.join('<th>%s</th>' % r['name'] for r in results)
+        body = ''
+        for k in keys:
+            vals = [(r.get('params') or {}).get(k) for r in results]
+            differ = len({json.dumps(v, default=str) for v in vals}) > 1
+            cells = ''.join(
+                '<td%s>%s</td>' % (' style="color:#e3b341;font-weight:600"' if differ else '',
+                                   '&mdash;' if v is None else v)
+                for v in vals)
+            body += '<tr><th class="rowh">%s</th>%s</tr>' % (k, cells)
+        cfg_lines = ('<h2>Parameters</h2>'
+                     '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>'
+                     '<p class="note">highlighted values differ between runs</p>'
+                     % (head, body))
+    else:
+        cfg_lines = ''
 
     # timeframe disclaimer (from whichever runs recorded one)
     tfs = sorted({str((r.get('params') or {}).get('timeframe', '1m')) for r in results})
@@ -507,6 +523,8 @@ def _job_symdata(chart_dir):
                            'v': [c['close'] for c in candles[::st]]},
                  'lines': []}
         for L in (cd.get('lines') or []):
+            if L.get('kind') == 'additional':
+                continue                # diag series live in the dashboard view
             pts = L.get('points') or []
             if len(pts) < 2:
                 continue

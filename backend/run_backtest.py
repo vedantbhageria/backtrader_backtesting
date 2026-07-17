@@ -149,6 +149,11 @@ def _resolve_run_config(strategy=None, params=None, days=None):
     else:
         cls, eff = STRATEGY, dict(STRATEGY_PARAMS)
     for k, v in (params or {}).items():
+        if k == 'diag':
+            # always accepted (drives the additional-data CSVs) even though
+            # the tuned-default dicts don't list it
+            eff['diag'] = v if isinstance(v, bool) else str(v).lower() in ('1', 'true', 'yes', 'on')
+            continue
         if k not in eff:
             print('[backtest] ignoring unknown param %r for %s' % (k, cls.__name__))
             continue
@@ -398,6 +403,37 @@ def _risk_metrics(rets, bars_per_day=1440):
     return out
 
 
+_ADD_PALETTE = ['#58a6ff', '#e8834c', '#5cc98a', '#b58cf0', '#e5566a',
+                '#4fc6c0', '#d29922', '#8b96a5', '#ff7eb6']
+
+
+def _additional_lines(rows):
+    """Diag recorder rows -> ADDITIONAL chart series (kind='additional'),
+    grouped for the dashboard's additional-data graphs. Only fields that are
+    NOT already on the main chart (innovation, band, state vector, covariance
+    matrix) — price/pred/upper/lower live in the main lines already."""
+    if not rows:
+        return []
+    keys = list(rows[0].keys())
+    groups = [
+        ('innovation', [k for k in ('innov', 'band') if k in keys]),
+        ('state', [k for k in keys if k in ('x1', 'x2')]),
+        ('covariance', [k for k in keys if k.startswith('P')]),
+    ]
+    out, ci = [], 0
+    for gname, ks in groups:
+        for k in ks:
+            pts = [{'time': r['t'], 'value': round(float(r[k]), 10)}
+                   for r in rows
+                   if r.get(k) is not None and r[k] == r[k]]
+            if len(pts) < 2:
+                continue
+            out.append({'name': k, 'color': _ADD_PALETTE[ci % len(_ADD_PALETTE)],
+                        'kind': 'additional', 'group': gname, 'points': pts})
+            ci += 1
+    return out
+
+
 def _dump_chartdata(strat):
     """Write per-symbol chart JSON: candles + fill markers + whatever overlay
     lines the strategy exposes via build_chart_lines(). Strategy-agnostic —
@@ -440,9 +476,15 @@ def _dump_chartdata(strat):
             })
         markers.sort(key=lambda m: m['time'])
 
+        # strategy overlay lines are the MAIN chart; diag-derived series ride
+        # along tagged kind='additional' (shown in the additional-data view)
+        lines = list(lines_by_symbol.get(d._name, []))
+        for L in lines:
+            L.setdefault('kind', 'main')
+        lines += _additional_lines(strat._diag.get(d._name, []))
         cd = {'symbol': d._name,
               'candles': candles,
-              'lines': lines_by_symbol.get(d._name, []),
+              'lines': lines,
               'markers': markers,
               'positions': pos_by_symbol.get(d._name, [])}
         with open(os.path.join(CHARTDATA_DIR, '%s.json' % d._name), 'w',
@@ -522,29 +564,62 @@ def _dump_run_config(out_dir, strat, bt_start, bt_end, n_symbols, days=None,
 
 
 def _write_report_xlsx(out_dir, config_rows, stats, run_tag):
+    """One STYLED xlsx per run: bordered setting/value header, striped config
+    rows, then a metric/value block whose values are filled red (negative) or
+    green (positive)."""
     try:
-        import pandas as pd
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     except Exception as e:
         print('[backtest] xlsx skipped (%s)' % e)
         return
-    cfg = pd.DataFrame(config_rows, columns=['setting', 'value'])
-    ps = pd.Series(stats or {}, dtype=object).rename('value')
-    ps.index.name = 'metric'
-
-    def _dump(path, append):
-        # config on top, perf stats below, in one sheet named by the run.
-        kw = dict(engine='openpyxl')
-        if append:
-            kw.update(mode='a', if_sheet_exists='overlay')
-        with pd.ExcelWriter(path, **kw) as xl:
-            cfg.to_excel(xl, sheet_name=str(run_tag), index=False)
-            ps.to_excel(xl, sheet_name=str(run_tag), startrow=len(cfg) + 2)
-
-    # One xlsx per run, in the run's own folder. (The old accumulating
-    # historical_reports*.xlsx sheets were removed 2026-07-16 — postgres run
-    # history + the archive folders already cover that.)
     try:
-        _dump(os.path.join(out_dir, 'report.xlsx'), append=False)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = str(run_tag)[:31]
+        thin = Side(style='thin', color='000000')
+        box = Border(left=thin, right=thin, top=thin, bottom=thin)
+        center = Alignment(horizontal='center')
+        stripe = PatternFill('solid', fgColor='D9D9D9')
+        red = PatternFill('solid', fgColor='DA9694')
+        green = PatternFill('solid', fgColor='A9D08E')
+        ws.column_dimensions['A'].width = 34
+        ws.column_dimensions['B'].width = 26
+
+        def header(row, left, right):
+            for col, text in ((1, left), (2, right)):
+                c = ws.cell(row=row, column=col, value=text)
+                c.font = Font(bold=True)
+                c.alignment = center
+                c.border = box
+
+        header(1, 'setting', 'value')
+        r = 2
+        for i, (k, v) in enumerate(config_rows):
+            ws.cell(row=r, column=1, value=k)
+            c = ws.cell(row=r, column=2, value=v)
+            if isinstance(v, bool):
+                c.value = 'TRUE' if v else 'FALSE'
+                c.alignment = center
+            if i % 2 == 0:                       # striped config rows
+                ws.cell(row=r, column=1).fill = stripe
+                c.fill = stripe
+            r += 1
+
+        header(r, 'metric', 'value')
+        r += 1
+        for k, v in (stats or {}).items():
+            name = ws.cell(row=r, column=1, value=k)
+            name.font = Font(bold=True)
+            name.alignment = center
+            name.border = box
+            c = ws.cell(row=r, column=2, value=v)
+            c.border = box
+            if isinstance(v, (int, float)) and v == v:
+                c.fill = red if v < 0 else green
+            r += 1
+
+        wb.save(os.path.join(out_dir, 'report.xlsx'))
     except Exception as e:
         print('[backtest] per-run xlsx failed: %s' % e)
 
@@ -644,6 +719,9 @@ def run(strategy=None, params=None, days=None, timeframe='1m'):
     started = time.time()
     cls, eff_params, days = _resolve_run_config(strategy, params, days)
     timeframe = timeframe if timeframe in ('1m', '1h') else '1m'
+    # Per-bar filter internals ("additional data" CSVs) are recorded when the
+    # diag param is on — the dashboard's builder exposes it as a checkbox
+    # (defaults on for 1h; heavy on full-universe 1m runs: GBs of RAM).
 
     try:
         _status(state='running', phase='loading',
@@ -749,6 +827,8 @@ def run(strategy=None, params=None, days=None, timeframe='1m'):
         # ---- chart data (candles + EMAs + fills for interactive charts) -
         _status(state='running', phase='charts', done=0, total=len(symbols))
         charts = _dump_chartdata(strat)
+        # symbols whose chartdata carries additional (diag) series
+        extras = sorted(set(charts) & {s for s, rows in strat._diag.items() if rows})
         print('[backtest] chart data written for %d symbols' % len(charts))
 
         # ---- per-run report archive (pyfolio + position logs) -----------
@@ -797,6 +877,7 @@ def run(strategy=None, params=None, days=None, timeframe='1m'):
             'summary': summary,
             'per_symbol': per_symbol,
             'charts': charts,
+            'extras': extras,     # symbols with an additional-data CSV
             'equity': equity,
             'trades': strat.trade_log[-2000:],
             'pyfolio': {'images': pf_images, 'stats': pf_stats,

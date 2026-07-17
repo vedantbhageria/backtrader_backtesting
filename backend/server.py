@@ -452,15 +452,26 @@ _gen2archive: dict = {}   # archive tag -> generated
 _gen2job: dict = {}       # job id -> generated
 
 
+def _gen_key(iso):
+    """Timezone-proof matching key for a 'generated' timestamp: postgres
+    returns it localized (+05:30) while run.json/results.json store UTC."""
+    if not iso:
+        return None
+    try:
+        return round(datetime.fromisoformat(str(iso)).timestamp(), 3)
+    except (TypeError, ValueError):
+        return str(iso)
+
+
 def _folder_links():
-    """{generated: {'archive_tag':…}} ∪ {generated: {'job_id':…}} so history
-    rows (postgres) can be tied back to their artifact folders."""
+    """{generated_key: {'archive_tag':…, 'job_id':…}} so history rows
+    (postgres) can be tied back to their artifact folders."""
     links = {}
     tdir = run_backtest.TEST_DATA_DIR
     for tag in (os.listdir(tdir) if os.path.isdir(tdir) else []):
         if tag not in _gen2archive:
             snap = _read_json(os.path.join(tdir, tag, 'run.json'))
-            _gen2archive[tag] = (snap or {}).get('generated')
+            _gen2archive[tag] = _gen_key((snap or {}).get('generated'))
         g = _gen2archive[tag]
         if g and os.path.isdir(os.path.join(tdir, tag)):
             links.setdefault(g, {})['archive_tag'] = tag
@@ -469,7 +480,7 @@ def _folder_links():
     for jid in done:
         if jid not in _gen2job:
             res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
-            _gen2job[jid] = (res or {}).get('generated')
+            _gen2job[jid] = _gen_key((res or {}).get('generated'))
         g = _gen2job[jid]
         if g and os.path.isfile(os.path.join(JOBS_DIR, jid, 'results.json')):
             links.setdefault(g, {})['job_id'] = jid
@@ -491,7 +502,18 @@ def runs_history(limit: int = 500):
                             status_code=503)
     links = _folder_links()
     for r in out:
-        r.update(links.get(r.get('generated'), {}))
+        r.update(links.get(_gen_key(r.get('generated')), {}))
+        jid, tag = r.get('job_id'), r.get('archive_tag')
+        artifact_dirs = []
+        if jid:
+            artifact_dirs.append(os.path.join(JOBS_DIR, jid))
+        if tag:
+            artifact_dirs.append(os.path.join(run_backtest.TEST_DATA_DIR, tag))
+        r['has_crosssectional_xlsx'] = any(os.path.isfile(os.path.join(d, 'crosssectionaltests.xlsx'))
+                                          for d in artifact_dirs)
+        r['has_portfolio_xlsx'] = any(os.path.isfile(os.path.join(d, 'portfolio_stats.xlsx')) or
+                                      os.path.isfile(os.path.join(d, 'report.xlsx'))
+                                      for d in artifact_dirs)
     return {'runs': out}
 
 
@@ -969,6 +991,227 @@ def job_results(jid: str):
     res['chartbase'] = '/reports/jobs/%s/chartdata' % jid
     res['job_id'] = jid
     return res
+
+
+def _safe_job_id(jid):
+    return bool(jid) and all(c.isalnum() or c in '-_' for c in str(jid))
+
+
+def _archive_for_job(jid):
+    """Find the test_data archive belonging to a completed job, if present."""
+    res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json')) or {}
+    key = _gen_key(res.get('generated'))
+    if not key or not os.path.isdir(run_backtest.TEST_DATA_DIR):
+        return None
+    for tag in os.listdir(run_backtest.TEST_DATA_DIR):
+        snap = _read_json(os.path.join(run_backtest.TEST_DATA_DIR, tag, 'run.json')) or {}
+        if _gen_key(snap.get('generated')) == key:
+            return os.path.join(run_backtest.TEST_DATA_DIR, tag)
+    return None
+
+
+def _artifact_paths(jid, filename):
+    paths = []
+    job_dir = os.path.join(JOBS_DIR, jid)
+    if os.path.isdir(job_dir):
+        paths.append(os.path.join(job_dir, filename))
+    archive = _archive_for_job(jid)
+    if archive:
+        paths.append(os.path.join(archive, filename))
+    return paths
+
+
+def _save_crosssectional_xlsx(path, test_name, data):
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    try:
+        wb = load_workbook(path) if os.path.isfile(path) else Workbook()
+    except Exception:
+        wb = Workbook()
+    if wb.sheetnames == ['Sheet'] and wb['Sheet'].max_row == 1 and wb['Sheet']['A1'].value is None:
+        del wb['Sheet']
+    title = ''.join(c for c in str(test_name or 'test') if c.isalnum() or c in ' _-')[:28] or 'test'
+    if title in wb.sheetnames:
+        del wb[title]
+    ws = wb.create_sheet(title)
+    header_fill = PatternFill('solid', fgColor='1F2937')
+    ws.append(['Cross-sectional test', test_name or 'test'])
+    ws.append(['Job', data.get('job')])
+    ws.append(['Signal', data.get('signal')])
+    ws.append([])
+    ws.append(['Horizon', 'Mean IC', 'IC std', 'IR', 't-stat', '% positive', 'Observations'])
+    for c in ws[5]:
+        c.font = Font(bold=True, color='FFFFFF')
+        c.fill = header_fill
+    horizons = data.get('horizons') or {}
+    for h, item in horizons.items():
+        if item.get('error'):
+            ws.append([h, item.get('error')])
+            continue
+        ws.append([h, item.get('mean'), item.get('std'), item.get('ir'), item.get('tstat'),
+                   item.get('pos_share'), item.get('n')])
+    ws.append([])
+    ws.append(['Rolling series'])
+    ws.append(['Horizon', 'Time', 'Value'])
+    for h, item in horizons.items():
+        for point in item.get('series') or []:
+            ws.append([h, point[0], point[1]])
+    for col in range(1, ws.max_column + 1):
+        ws.column_dimensions[get_column_letter(col)].width = min(42, max(12, max(
+            len(str(ws.cell(row=r, column=col).value or '')) for r in range(1, ws.max_row + 1)) + 2))
+    wb.save(path)
+
+
+def _save_portfolio_xlsx(path, results):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Portfolio stats'
+    ws.append(['Metric', 'Value'])
+    for c in ws[1]:
+        c.font = Font(bold=True, color='FFFFFF')
+        c.fill = PatternFill('solid', fgColor='1F2937')
+    for k, v in (results.get('pyfolio') or {}).get('stats', {}).items():
+        ws.append([k, v])
+    ws2 = wb.create_sheet('Parameters')
+    ws2.append(['Parameter', 'Value'])
+    for k, v in (results.get('params') or {}).items():
+        ws2.append([k, v])
+    for sh in wb.worksheets:
+        sh.column_dimensions['A'].width = 32
+        sh.column_dimensions['B'].width = 28
+    wb.save(path)
+
+
+@app.post('/api/test/export/{jid}')
+async def export_crosssectional(jid: str, request: Request):
+    if not _safe_job_id(jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    data = await request.json()
+    test_name = str(data.get('test') or 'test')
+    paths = _artifact_paths(jid, 'crosssectionaltests.xlsx')
+    if not paths:
+        return JSONResponse({'error': 'job folder not found'}, status_code=404)
+    try:
+        for path in paths:
+            _save_crosssectional_xlsx(path, test_name, data.get('data') or {})
+    except Exception as e:
+        return JSONResponse({'error': 'could not save workbook: %s' % e}, status_code=500)
+    return {'ok': True, 'filename': 'crosssectionaltests.xlsx', 'paths': len(paths)}
+
+
+@app.get('/api/download/crosssectional/{jid}')
+def download_crosssectional(jid: str):
+    if not _safe_job_id(jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    path = os.path.join(JOBS_DIR, jid, 'crosssectionaltests.xlsx')
+    if not os.path.isfile(path):
+        return JSONResponse({'error': 'cross-sectional workbook has not been exported'}, status_code=404)
+    return FileResponse(path, filename='crosssectionaltests.xlsx')
+
+
+@app.get('/api/download/portfolio/{jid}')
+def download_portfolio(jid: str):
+    if not _safe_job_id(jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    paths = _artifact_paths(jid, 'portfolio_stats.xlsx')
+    job_path = paths[0] if paths else None
+    res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+    if res is None or not job_path:
+        return JSONResponse({'error': 'job results are unavailable'}, status_code=404)
+    try:
+        _save_portfolio_xlsx(job_path, res)
+        for archive_path in paths[1:]:
+            shutil.copy2(job_path, archive_path)
+    except Exception as e:
+        return JSONResponse({'error': 'could not save workbook: %s' % e}, status_code=500)
+    return FileResponse(job_path, filename='portfolio_stats.xlsx')
+
+
+# ---- testing hub: cross-sectional analytics on a finished job -------------
+@app.get('/api/test/ic/{jid}')
+def information_coefficient(jid: str, horizons: str = '1,4,24'):
+    """Cross-sectional Information Coefficient for one job.
+
+    Signal (per symbol, per bar): (prediction - close) / close — the filter's
+    expected relative move (its first MAIN chart line is taken as the
+    prediction). Forward return over horizon h: close[t+h]/close[t] - 1.
+    IC_t = Spearman rank correlation across symbols between signal_t and the
+    h-bar forward return, computed at every bar with >= 10 symbols. Summary
+    per horizon: mean IC, std, IR (=mean/std), t-stat (=IR*sqrt(n)), share of
+    positive ICs, observations. NOTE: for h>1 consecutive ICs overlap, so the
+    plain t-stat overstates significance — treat it as indicative.
+    """
+    if not all(c.isalnum() or c in '-_' for c in jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    cdir = os.path.join(JOBS_DIR, jid, 'chartdata')
+    if not os.path.isdir(cdir):
+        return JSONResponse({'error': 'job has no chart data'}, status_code=404)
+    try:
+        hs = sorted({max(1, int(h)) for h in horizons.split(',') if h.strip()})[:6]
+    except ValueError:
+        return JSONResponse({'error': 'bad horizons'}, status_code=400)
+
+    import numpy as np
+    import pandas as pd
+
+    closes, preds = {}, {}
+    for p in os.listdir(cdir):
+        if not p.endswith('.json'):
+            continue
+        cd = _read_json(os.path.join(cdir, p))
+        if not cd:
+            continue
+        sym = p[:-5]
+        candles = cd.get('candles') or []
+        main = [L for L in (cd.get('lines') or []) if L.get('kind') != 'additional']
+        if len(candles) < 30 or not main or len(main[0].get('points') or []) < 30:
+            continue
+        closes[sym] = pd.Series({c['time']: c['close'] for c in candles})
+        preds[sym] = pd.Series({q['time']: q['value'] for q in main[0]['points']})
+    if len(closes) < 10:
+        return JSONResponse({'error': 'need >=10 symbols with prediction lines '
+                             '(got %d)' % len(closes)}, status_code=400)
+
+    C = pd.DataFrame(closes)          # bars x symbols (aligned on epoch time)
+    P = pd.DataFrame(preds).reindex(C.index)
+    S = (P - C) / C                   # the cross-sectional signal
+
+    def rowwise_ic(sig, fwd):
+        both = sig.notna() & fwd.notna()
+        n = both.sum(axis=1)
+        rs = sig.where(both).rank(axis=1)
+        rf = fwd.where(both).rank(axis=1)
+        rs = rs.sub(rs.mean(axis=1), axis=0)
+        rf = rf.sub(rf.mean(axis=1), axis=0)
+        cov = (rs * rf).sum(axis=1)
+        den = np.sqrt((rs ** 2).sum(axis=1) * (rf ** 2).sum(axis=1))
+        ic = cov / den.replace(0, np.nan)
+        return ic.where(n >= 10).dropna()
+
+    out = {}
+    for h in hs:
+        F = C.shift(-h) / C - 1.0
+        ic = rowwise_ic(S, F)
+        if ic.empty:
+            out[str(h)] = {'error': 'no overlapping observations'}
+            continue
+        mean, std, n = float(ic.mean()), float(ic.std(ddof=1)), int(len(ic))
+        step = max(1, n // 500)
+        out[str(h)] = {
+            'mean': round(mean, 5), 'std': round(std, 5),
+            'ir': round(mean / std, 4) if std > 0 else None,
+            'tstat': round(mean / std * np.sqrt(n), 2) if std > 0 else None,
+            'pos_share': round(float((ic > 0).mean()), 4), 'n': n,
+            'series': [[int(t), round(float(v), 5)]
+                       for t, v in ic.iloc[::step].items()],
+        }
+    return {'job': jid, 'symbols': len(closes), 'bars': len(C),
+            'signal': '(prediction - close) / close from each symbol\'s main line',
+            'horizons': out}
 
 
 @app.get('/api/logs')

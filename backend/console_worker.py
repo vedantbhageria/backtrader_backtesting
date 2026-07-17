@@ -23,6 +23,71 @@ import _paths
 BASE = _paths.ROOT   # reports/ lives at project root
 REPORTS = os.path.join(BASE, 'reports')
 CHARTDATA = os.path.join(REPORTS, 'chartdata')
+JOBS_DIR = os.path.join(REPORTS, 'jobs')
+
+# --- job context: every helper reads from the SELECTED job's folder ---------
+_ctx = {'job': None, 'dir': REPORTS, 'chart': CHARTDATA}
+
+
+def _job_index():
+    try:
+        with open(os.path.join(JOBS_DIR, 'index.json'), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def jobs():
+    """List all backtest jobs (id, state, strategy, timeframe, pnl). The
+    helpers read from whichever job you select with use(<id or index>)."""
+    metas = _job_index()
+    rows = []
+    for i, m in enumerate(metas):
+        s_ = m.get('summary') or {}
+        rows.append({'i': i, 'id': m['id'], 'state': m['state'],
+                     'strategy': m['strategy'], 'tf': m['timeframe'],
+                     'days': m.get('days'), 'pnl': s_.get('pnl'),
+                     'sharpe': s_.get('sharpe_arithmetic'),
+                     'has_folder': os.path.isdir(os.path.join(JOBS_DIR, m['id']))})
+    df = None
+    try:
+        df = pd.DataFrame(rows)
+    except Exception:
+        pass
+    if df is not None and not df.empty:
+        print(df.to_string(index=False))
+    return metas
+
+
+def use(job=None):
+    """Point the helpers at a job: use('j20260716-...') or use(3) (index from
+    jobs()). use(None) -> latest finished job; use('legacy') -> old reports/."""
+    global _ctx
+    if job == 'legacy':
+        _ctx = {'job': None, 'dir': REPORTS, 'chart': CHARTDATA}
+        print('using legacy reports/ artifacts')
+        return
+    metas = _job_index()
+    if job is None:
+        done = [m for m in metas if m['state'] == 'done'
+                and os.path.isdir(os.path.join(JOBS_DIR, m['id']))]
+        if not done:
+            return
+        jid = done[-1]['id']
+    elif isinstance(job, int):
+        jid = metas[job]['id']
+    else:
+        jid = str(job)
+    d = os.path.join(JOBS_DIR, jid)
+    if not os.path.isdir(d):
+        print('job folder missing:', jid)
+        return
+    _ctx = {'job': jid, 'dir': d, 'chart': os.path.join(d, 'chartdata')}
+    if job is not None:
+        print('using job', jid)
+
+
+use(None)  # default to the most recent finished job when there is one
 
 import numpy as np
 import pandas as pd
@@ -32,19 +97,19 @@ pd.set_option('display.max_columns', 40)
 
 def results():
     """reports/results.json as a dict (summary, params, per_symbol, ...)."""
-    with open(os.path.join(REPORTS, 'results.json'), encoding='utf-8') as f:
+    with open(os.path.join(_ctx['dir'], 'results.json'), encoding='utf-8') as f:
         return json.load(f)
 
 
 def symbols():
     """Symbols that have chart data from the last run."""
     return sorted(os.path.basename(p)[:-5]
-                  for p in glob.glob(os.path.join(CHARTDATA, '*.json')))
+                  for p in glob.glob(os.path.join(_ctx['chart'], '*.json')))
 
 
 def chartdata(sym):
     """Raw chartdata dict for a symbol: candles, lines, markers, positions."""
-    with open(os.path.join(CHARTDATA, '%s.json' % sym.upper()),
+    with open(os.path.join(_ctx['chart'], '%s.json' % sym.upper()),
               encoding='utf-8') as f:
         return json.load(f)
 
@@ -78,7 +143,7 @@ def markers(sym):
 
 def positions(sym=None):
     """Closed positions (reports/positions.csv); optionally one symbol."""
-    df = pd.read_csv(os.path.join(REPORTS, 'positions.csv'))
+    df = pd.read_csv(os.path.join(_ctx['dir'], 'positions.csv'))
     if sym:
         df = df[df['symbol'] == sym.upper()].reset_index(drop=True)
     return df
@@ -94,7 +159,9 @@ def equity():
 
 def _help_text():
     return (
-        "data helpers (all read the LAST run's artifacts):\n"
+        "data helpers (read the SELECTED job's artifacts):\n"
+        "  jobs()           list all backtest jobs\n"
+        "  use(id|index)    point every helper at that job (default: latest)\n"
         "  results()        results.json dict: summary, params, per_symbol...\n"
         "  symbols()        symbols with chart data\n"
         "  candles(sym)     OHLCV DataFrame indexed by UTC time\n"
