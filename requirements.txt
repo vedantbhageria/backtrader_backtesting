@@ -1,0 +1,22 @@
+# Web server
+fastapi
+uvicorn
+
+# Backtesting engine + strategy libs
+backtrader
+numpy
+pandas
+numba
+
+# Database
+psycopg2-binary
+
+# Reports / analysis
+plotly
+matplotlib
+openpyxl
+pyfolio-reloaded
+empyrical-reloaded
+
+# HTTP client (Binance data fetch, etc.)
+requests

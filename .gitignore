@@ -1,0 +1,30 @@
+
+# Claude Code session/config (local to this machine)
+.claude/
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python bytecode / numba JIT caches
+__pycache__/
+*.pyc
+*.pyo
+*.nbi
+*.nbc
+
+# electron build artifacts
+electron/node_modules/
+electron/dist/
+
+# generated artifacts (backtest outputs, archived runs, built reports)
+reports/
+report_out/
+
+# market data CSVs (regenerated via sync from Postgres / Binance)
+datas/
+datas_1h/
+
+# local secrets / env overrides, if any ever get added
+.env
+.env.*
