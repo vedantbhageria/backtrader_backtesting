@@ -194,6 +194,10 @@
   #symlist li:hover { background: var(--panel2); }
   #symlist li.sel { background: var(--panel2); border-left-color: var(--accent); }
   #symlist li .pnl { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  #symlist li .symleft { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  /* faded sector/category tag next to a symbol name — Binance-style */
+  .symtag { color: var(--faint); font-size: 10px; text-transform: uppercase;
+            letter-spacing: .03em; white-space: nowrap; }
   #symlist::-webkit-scrollbar { width: 8px; }
   #symlist::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
   #symlist::-webkit-scrollbar-track { background: transparent; }
@@ -575,12 +579,25 @@
     border-radius: 10px; padding: 12px 16px; }
   #comparediff[hidden] { display: none; }
   .jobdiff-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
-  .comparetbl { font-size: 12px; border-collapse: collapse; white-space: nowrap; }
-  .comparetbl th, .comparetbl td { padding: 6px 14px; text-align: right; border-bottom: 1px solid var(--line, var(--border)); }
+  /* table-layout:fixed + a shared first-column width keeps the metric table
+     and the param table's columns lined up even though their cell content
+     differs (numbers vs. param strings) */
+  .comparetbl { font-size: 12px; border-collapse: collapse; white-space: nowrap;
+    table-layout: fixed; width: 100%; }
+  .comparetbl th, .comparetbl td { padding: 6px 14px; text-align: right; border-bottom: 1px solid var(--line, var(--border));
+    overflow: hidden; text-overflow: ellipsis; }
   .comparetbl thead th { text-align: center; vertical-align: bottom; font-weight: 600; color: var(--muted); }
+  .comparetbl .rowh, .comparetbl thead th:first-child { width: 170px; }
   .comparetbl .rowh { text-align: left; color: var(--text); font-weight: 600;
     position: sticky; left: 0; background: var(--panel); z-index: 1; }
   .comparetbl td.differs { color: var(--amber); font-weight: 600; }
+  #comparesymbols[hidden] { display: none; }
+  #comparesymbols { margin-top: 22px; }
+  .symcomparegroup { margin-top: 14px; }
+  .symcomparegroup-h { font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); margin: 16px 0 8px;
+    padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .symcomparetbl { margin-bottom: 10px; }
   .sweep { margin-bottom: 20px; }
   .sweep-h { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
   .sweep-tbl { border-collapse: collapse; font-size: 11.5px; }
@@ -843,6 +860,25 @@
 
 <div id="ctxmenu" hidden></div>
 
+<!-- lightweight in-page replacement for window.prompt() — native dialogs can
+     get lost behind the app window / suppressed in some Electron setups -->
+<div id="promptmodal" hidden style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;">
+  <div style="background:var(--panel,#151922);border:1px solid var(--border,#2a3140);border-radius:8px;padding:18px;min-width:320px;max-width:90vw;">
+    <div id="promptmodal-label" style="margin-bottom:10px;font-size:14px;"></div>
+    <input id="promptmodal-input" type="text" style="width:100%;box-sizing:border-box;padding:8px;border-radius:5px;border:1px solid var(--border,#2a3140);background:var(--bg,#0b0e14);color:inherit;font:inherit;">
+    <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px;">
+      <button id="promptmodal-cancel" class="ghostbtn">Cancel</button>
+      <button id="promptmodal-ok" class="ghostbtn">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- lightweight in-page replacement for window.alert() — same rationale as
+     promptmodal above: a blocking native dialog that fails to surface (or
+     fails to fully dismiss) can leave the page looking unresponsive, which
+     then also blocks the NEXT promptModal's input from taking focus/typing -->
+<div id="toaststack" style="position:fixed;right:16px;bottom:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;"></div>
+
 <!-- additional-data side drawer (per-symbol filter internals from a job) -->
 <div id="extradrawer" hidden>
   <div id="extradrawer-h">
@@ -885,6 +921,16 @@
   </div>
   <div id="detailchart"></div>
 </div>
+<div id="mcdetailwin" hidden style="position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;">
+  <div style="background:var(--panel,#151922);border:1px solid var(--border,#2a3140);border-radius:10px;padding:18px;width:min(1200px,94vw);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <b>Monte Carlo · detailed view</b>
+      <span id="mcdetailclose" style="cursor:pointer;font-size:18px;" title="Close">✕</span>
+    </div>
+    <canvas id="mccanvas-big" width="1600" height="640" style="width:100%;max-height:70vh;cursor:grab" title="scroll to zoom · drag to pan · double-click to reset"></canvas>
+    <div id="mcstats-big" class="note" style="margin-top:8px"></div>
+  </div>
+</div>
 <button id="scrolltop" title="Back to top">↑</button>
 <div id="commandPalette" hidden>
   <div id="commandBox">
@@ -909,7 +955,6 @@
   </span>
 </nav>
 <main>
-  <div id="empty" hidden>No results yet — press <b>Run Backtest</b>.</div>
   <div id="loadbanner" class="loadbanner" style="display:none"></div>
 
   <section id="tab-backtests">
@@ -998,21 +1043,28 @@
     <div class="panel">
       <div class="panel-h"><span>Compare</span>
         <span style="display:inline-flex;gap:8px;align-items:center">
-          <label class="tinynote" for="sweepmetric">heatmap colour</label>
+          <label class="tinynote" for="sweepmetric"
+            title="The heatmap is a grid over the param(s) that vary across a batch of same-strategy/timeframe/days jobs — one axis per varying param, one cell per job. Each cell is colored (red→green) and labeled by the metric picked here, so you can see at a glance which param combo performed best.">
+            heatmap colour ⓘ</label>
           <select id="sweepmetric">
             <option value="sharpe_arithmetic">Sharpe</option>
             <option value="pnl">PnL</option>
             <option value="return_pct">Return %</option>
             <option value="win_rate_pct">Win %</option>
             <option value="max_drawdown_pct">Max DD %</option>
-            <option value="trades_closed">Trades</option>
+            <option value="trades_closed">Positions</option>
+            <option value="trades_total">Trades</option>
           </select>
           <button id="comparerefresh" class="ghostbtn" type="button">Refresh</button>
         </span></div>
       <div class="panel-b">
-        <p class="note" id="comparehint">Select ≥2 jobs on the <b>Backtests</b> board (drag a box or the marquee) and hit <b>Compare →</b> — any strategies. You'll always get a side-by-side table; jobs that also share a strategy/timeframe/days and vary in params additionally get a param heatmap below. With nothing selected this shows every detected sweep.</p>
+        <p class="note" id="comparehint">Select ≥2 jobs on the <b>Backtests</b> board (drag a box or the marquee) and hit <b>Compare →</b> — any strategies. You'll always get a side-by-side table; jobs that also share a strategy/timeframe/days and vary in params additionally get a param heatmap below (each cell = one job, colored by whichever metric is picked above). With nothing selected this shows every detected sweep.</p>
         <div id="comparediff" hidden></div>
         <div id="sweepview"></div>
+        <div id="comparebyclass" hidden></div>
+        <div id="classsweepview"></div>
+        <div id="comparesymbols" hidden></div>
+        <div id="symsweepview"></div>
       </div>
     </div>
   </section>
@@ -1109,6 +1161,7 @@
         </span></div>
       <div id="cmpbar" hidden>
         <span id="cmpcount" class="note"></span>
+        <button id="cmpintab" title="open the selected runs side-by-side in the Compare tab (job runs only)">compare in tab</button>
         <button id="repbuild">build compare report</button>
         <a href="#" id="cmpcancel" class="note">cancel</a>
       </div>
@@ -1123,7 +1176,8 @@
             <th class="num" data-key="days">Days</th>
             <th class="num" data-key="pnl">PnL</th>
             <th class="num" data-key="return_pct">Return %</th>
-            <th class="num" data-key="trades">Trades</th>
+            <th class="num" data-key="trades" title="closed position lifecycles">Positions</th>
+            <th class="num" data-key="trades_total" title="individual order fills (entries + scale-in adds + exits)">Trades</th>
             <th class="num" data-key="win">Win %</th>
             <th class="num" data-key="sharpe">Sharpe</th>
             <th class="num" data-key="dd">Max DD %</th>
@@ -1181,14 +1235,23 @@
       </div>
     </div>
 
+    <div id="testcontribclass-panel" class="panel" style="margin-top:16px">
+      <div class="panel-h"><span>By class</span>
+        <span class="note">every symbol of a sector/category (Layer 1, DeFi, Meme, ...) pooled into one trade-level line</span></div>
+      <div class="panel-b">
+        <div id="testcontribclass"><p class="note">Select a finished backtest to see the by-class breakdown.</p></div>
+      </div>
+    </div>
+
     <div class="panel" id="testmc-panel" style="margin-top:16px">
       <div class="panel-h"><span>Monte Carlo <span class="note" style="margin-left:8px">bootstrap: resample trades with replacement — is the edge real or one lucky draw?</span></span>
         <span style="display:inline-flex;gap:8px;align-items:center">
           <select id="mciters"><option value="500">500 runs</option><option value="1000" selected>1000 runs</option><option value="2000">2000 runs</option></select>
           <button id="mcrun" class="ghostbtn" type="button">Run</button>
+          <button id="mcexpand" class="ghostbtn" type="button" title="Open a larger view" disabled>⤢ Expand</button>
         </span></div>
       <div class="panel-b">
-        <canvas id="mccanvas" width="1400" height="300" style="width:100%;max-height:300px"></canvas>
+        <canvas id="mccanvas" width="1400" height="300" style="width:100%;max-height:300px;cursor:zoom-in"></canvas>
         <div id="mcstats" class="note" style="margin-top:8px">Select a finished backtest, then click Run to bootstrap its trade sequence into a confidence cone.</div>
       </div>
     </div>
@@ -1288,6 +1351,18 @@ let selected = null;   // selected symbol
 const $ = id => document.getElementById(id);
 const fmt = (v, d=2) => v == null ? '—' :
       Number(v).toLocaleString('en-US', {maximumFractionDigits: d, minimumFractionDigits: d});
+
+// ISO timestamp -> "16 Jul 2025, 11:59". The window bounds are stored as UTC
+// wall-clock WITHOUT a zone suffix, so append 'Z' before parsing (otherwise
+// JS reads them as local time and the UTC formatting below shifts the clock).
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const s = /[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z';
+  const d = new Date(s);
+  if (isNaN(d)) return String(iso);
+  return d.toLocaleString('en-GB', {day: '2-digit', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC'});
+}
 
 /* ---- shared table sorting helpers ---- */
 // nulls/NaN sort to the bottom in ascending order (top when descending).
@@ -1727,7 +1802,7 @@ function renderSymbols() {
   $('symlist').innerHTML = syms.map(s => {
     const p = per[s].pnl;
     return `<li data-sym="${s}" class="${s===selected?'sel':''}">
-      <span>${s}</span>
+      <span class="symleft"><span>${s}</span>${symClassTag(s)}</span>
       <span class="pnl ${p>=0?'pos':'neg'}">${fmt(p)}</span></li>`;
   }).join('');
   $('symlist').querySelectorAll('li').forEach(li =>
@@ -1743,8 +1818,8 @@ function selectSymbol(sym) {
   const stat = (k, v, cls='') =>
     `<div class="stat"><span class="k">${k}</span><span class="v ${cls}">${v}</span></div>`;
   $('symstats').innerHTML =
-    stat('Symbol', sym) +
-    stat('Trades', s.trades) +
+    stat('Symbol', sym + ' ' + symClassTag(sym)) +
+    stat('Positions', s.trades) +
     stat('PnL (USDT)', fmt(s.pnl), s.pnl>=0?'pos':'neg') +
     stat('Win rate', wr==null?'—':fmt(wr,1)+'%') +
     (R.chartbase ? `<button id="extrabtn" class="ghostbtn" style="width:100%"
@@ -2109,8 +2184,10 @@ const METRIC_HELP = {
   'End value': 'portfolio value in USDT at the end of the backtest window',
   'PnL': 'end value minus starting cash — total profit or loss in USDT',
   'Return': 'PnL as a percentage of starting cash',
-  'Trades': 'number of closed round-trip trades',
-  'Win rate': 'share of closed trades that were profitable',
+  'Unrealised': 'mark-to-market profit/loss of positions STILL OPEN at the end of the backtest (count of open positions in parentheses). Total PnL above ≈ realised (closed) + unrealised; the per-symbol/class tables split the two so they reconcile (unrealised is gross of the not-yet-paid exit commission, so expect a tiny residual).',
+  'Positions': 'closed position lifecycles (flat -> open -> flat). A scale-in ramp with several add-on tranches still counts as ONE position.',
+  'Trades': 'individual order fills — every entry, scale-in add-on, and exit that actually executed. Equal to Positions unless something adds to an already-open position.',
+  'Win rate': 'share of closed positions that were profitable',
   'Max drawdown': 'largest peak-to-trough decline in portfolio value over the run',
   'Ann. return (CAGR)': 'compound annual growth rate — the steady annual return that would compound to the same total return',
   'Ann. volatility (returns)': 'annualized standard deviation of simple period returns',
@@ -2120,8 +2197,9 @@ const METRIC_HELP = {
   'Symbols': 'number of symbols traded in this backtest',
   'ret': 'total return over the backtest window',
   'sharpe': 'Sharpe ratio (arithmetic) — risk-adjusted return',
-  'win': 'win rate — share of closed trades that were profitable',
-  'trades': 'number of closed round-trip trades',
+  'win': 'win rate — share of closed positions that were profitable',
+  'positions': 'closed position lifecycles (flat -> open -> flat) — a scale-in ramp is still ONE position',
+  'trades': 'individual order fills — every entry, scale-in add-on, and exit that executed',
   'maxDD': 'maximum drawdown — largest peak-to-trough decline in portfolio value',
 };
 
@@ -2133,7 +2211,10 @@ function renderAccount() {
     ['End value', fmt(s.end_value) + ' USDT', null],
     ['PnL', fmt(s.pnl) + ' USDT', s.pnl],
     ['Return', fmt(s.return_pct, 3) + '%', s.return_pct],
-    ['Trades', s.trades_closed, null],
+    ['Unrealised', s.unrealised_pnl == null ? '—' : fmt(s.unrealised_pnl) + ' USDT'
+      + (s.open_positions ? ` (${s.open_positions})` : ''), s.unrealised_pnl],
+    ['Positions', s.trades_closed ?? '—', null],
+    ['Trades', s.trades_total ?? '—', null],
     ['Win rate', s.win_rate_pct == null ? '—' : fmt(s.win_rate_pct, 1) + '%', null],
     ['Max drawdown', fmt(s.max_drawdown_pct, 2) + '%', null],
     // Two annualization conventions: arithmetic (returns add) vs CAGR (compound).
@@ -2301,12 +2382,15 @@ function pctile(sortedArr, p) {
   const i = Math.min(sortedArr.length - 1, Math.max(0, Math.round(p * (sortedArr.length - 1))));
   return sortedArr[i];
 }
+let MC_LAST_DATA = null;   // cached so the expand modal can redraw at a larger size
+const MC_SAMPLE_LINES = 40;   // individual bootstrap paths drawn faint, like a fan chart
 function runMonteCarlo() {
   const pnls = (typeof testR !== 'undefined' && testR && testR.trades || [])
     .map(t => t.pnlcomm).filter(v => typeof v === 'number');
   const n = pnls.length;
   if (n < 5) { $('mcstats').textContent = 'need at least 5 closed trades to bootstrap' +
-    (testR ? ' (this run exposes ' + n + '; archived runs store none)' : ' — pick a finished backtest first'); drawMonteCarlo(null); return; }
+    (testR ? ' (this run exposes ' + n + '; archived runs store none)' : ' — pick a finished backtest first');
+    MC_LAST_DATA = null; $('mcexpand').disabled = true; drawMonteCarlo(null, $('mccanvas')); return; }
   const iters = Number($('mciters').value) || 1000;
   const step = Math.max(1, Math.ceil(n / MC_CHK));
   const chkIdx = []; for (let i = step - 1; i < n; i += step) chkIdx.push(i);
@@ -2326,64 +2410,166 @@ function runMonteCarlo() {
   }
   const p5 = [], p50 = [], p95 = [];
   for (const arr of bands) { const s = Array.from(arr).sort((a, b) => a - b); p5.push(pctile(s, .05)); p50.push(pctile(s, .5)); p95.push(pctile(s, .95)); }
+  // a handful of individual bootstrap paths (first N iterations, in the
+  // original random order — not sorted/cherry-picked) so the fan chart shows
+  // real sample trajectories, not just the aggregate envelope
+  const sampleN = Math.min(MC_SAMPLE_LINES, iters);
+  const samples = [];
+  for (let it = 0; it < sampleN; it++) samples.push(bands.map(arr => arr[it]));
   // realized cumulative curve at the same checkpoints
   const realCum = []; let c = 0, ri = 0;
   for (let k = 0; k < n; k++) { c += pnls[k]; if (ri < chkIdx.length && k === chkIdx[ri]) { realCum.push(c); ri++; } }
   const sf = Array.from(finals).sort((a, b) => a - b);
   const sd = Array.from(maxdds).sort((a, b) => a - b);
-  drawMonteCarlo({p5, p50, p95, real: realCum});
+  MC_LAST_DATA = {p5, p50, p95, real: realCum, samples};
+  $('mcexpand').disabled = false;
+  drawMonteCarlo(MC_LAST_DATA, $('mccanvas'));
   const pct = v => (v >= 0 ? '+' : '') + fmt(v, 0);
-  $('mcstats').innerHTML =
-    `<b>${n}</b> trades · <b>${iters}</b> bootstraps &nbsp;·&nbsp; ` +
+  const statsHtml =
+    `<b>${n}</b> trades · <b>${iters}</b> bootstraps (${sampleN} sample paths shown) &nbsp;·&nbsp; ` +
     `final PnL median <b>${pct(pctile(sf, .5))}</b> ` +
     `<span class="note">(5–95%: ${pct(pctile(sf, .05))} … ${pct(pctile(sf, .95))})</span> &nbsp;·&nbsp; ` +
     `<b class="${profitable / iters >= .5 ? 'pos' : 'neg'}">${fmt(100 * profitable / iters, 1)}%</b> of runs profitable &nbsp;·&nbsp; ` +
     `median max drawdown <b class="neg">${fmt(pctile(sd, .5), 0)}</b> ` +
     `<span class="note">(5% worst ${fmt(pctile(sd, .05), 0)})</span>`;
+  $('mcstats').innerHTML = statsHtml;
+  if (!$('mcdetailwin').hidden) {
+    // re-run while zoomed: clamp the existing window to the new series length
+    if (!MC_VIEW || MC_VIEW.i1 > p50.length - 1) MC_VIEW = {i0: 0, i1: p50.length - 1};
+    drawMonteCarlo(MC_LAST_DATA, $('mccanvas-big'), MC_VIEW);
+    $('mcstats-big').innerHTML = statsHtml;
+  }
 }
-function drawMonteCarlo(d) {
-  const c = $('mccanvas'), ctx = c.getContext('2d');
+// view = {i0, i1} fractional checkpoint-index window (for the zoomable big
+// canvas); null/omitted draws the whole series (small inline canvas). y auto-
+// scales to whatever's visible so zooming in also zooms the value axis.
+function drawMonteCarlo(d, canvas, view) {
+  const c = canvas || $('mccanvas'), ctx = c.getContext('2d');
   ctx.clearRect(0, 0, c.width, c.height);
   if (!d) return;
-  const all = [...d.p5, ...d.p95, ...d.real, 0];
-  const min = Math.min(...all), max = Math.max(...all);
+  const N = d.p50.length;
+  const i0 = view ? Math.max(0, view.i0) : 0;
+  const i1 = view ? Math.min(N - 1, view.i1) : N - 1;
+  const lo = Math.floor(i0), hi = Math.ceil(i1);
+  // y-range over the VISIBLE checkpoints only
+  const vis = [0];
+  for (let i = lo; i <= hi; i++) { vis.push(d.p5[i], d.p95[i], d.real[i]); }
+  const min = Math.min(...vis), max = Math.max(...vis);
   const pad = 44, w = c.width - pad * 2, h = c.height - pad * 2;
   const y = v => pad + h - (max === min ? h / 2 : (v - min) / (max - min) * h);
-  const x = i => pad + i / (d.p50.length - 1) * w;
+  const span = (i1 - i0) || 1;
+  const x = i => pad + (i - i0) / span * w;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(pad, 0, w, c.height); ctx.clip();   // keep lines inside the plot
   // zero line
   if (min < 0 && max > 0) { ctx.strokeStyle = '#33415a'; ctx.beginPath(); ctx.moveTo(pad, y(0)); ctx.lineTo(pad + w, y(0)); ctx.stroke(); }
   // 5–95 band
   ctx.beginPath();
   d.p95.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v)));
-  for (let i = d.p5.length - 1; i >= 0; i--) ctx.lineTo(x(i), y(d.p5[i]));
+  for (let i = N - 1; i >= 0; i--) ctx.lineTo(x(i), y(d.p5[i]));
   ctx.closePath(); ctx.fillStyle = 'rgba(88,166,255,.16)'; ctx.fill();
+  // individual bootstrap sample paths — thin, translucent, colored by
+  // whether that particular draw ended up profitable
+  ctx.lineWidth = 1;
+  (d.samples || []).forEach(path => {
+    const endUp = path[path.length - 1] >= 0;
+    ctx.strokeStyle = endUp ? 'rgba(63,185,80,.35)' : 'rgba(248,81,73,.35)';
+    ctx.beginPath();
+    path.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v)));
+    ctx.stroke();
+  });
   // median (dashed)
   ctx.strokeStyle = '#8a97ad'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.beginPath();
   d.p50.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v))); ctx.stroke(); ctx.setLineDash([]);
   // realized curve
   const up = d.real[d.real.length - 1] >= 0;
-  ctx.strokeStyle = up ? '#3fb950' : '#f85149'; ctx.lineWidth = 1.8; ctx.beginPath();
+  ctx.strokeStyle = up ? '#3fb950' : '#f85149'; ctx.lineWidth = 2.4; ctx.beginPath();
   d.real.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(0), y(v))); ctx.stroke();
+  ctx.restore();
   ctx.fillStyle = '#8b96a5'; ctx.font = '11px sans-serif';
   ctx.fillText(fmt(max, 0), 4, y(max) + 4); ctx.fillText(fmt(min, 0), 4, y(min) - 2);
-  ctx.fillText('band = 5–95% · dashed = median · solid = actual', pad, c.height - 6);
+  const hint = view && (i0 > 0 || i1 < N - 1)
+    ? `zoomed ${Math.round(i0)}–${Math.round(i1)} of ${N - 1} · scroll to zoom · drag to pan · double-click to reset`
+    : 'shaded = 5–95% · faint lines = individual bootstrap draws · dashed = median · bold = actual · scroll to zoom';
+  ctx.fillText(hint, pad, c.height - 6);
 }
 $('mcrun').onclick = runMonteCarlo;
 $('mciters').onchange = () => { if (!$('mcstats').textContent.startsWith('Click Run')) runMonteCarlo(); };
+$('mccanvas').onclick = () => { if (MC_LAST_DATA) openMcDetail(); };
+$('mcexpand').onclick = openMcDetail;
+$('mcdetailclose').onclick = () => { $('mcdetailwin').hidden = true; };
+
+// zoomable big-canvas state (fractional checkpoint-index window)
+let MC_VIEW = null;
+function mcRedrawBig() { drawMonteCarlo(MC_LAST_DATA, $('mccanvas-big'), MC_VIEW); }
+function openMcDetail() {
+  if (!MC_LAST_DATA) return;
+  $('mcdetailwin').hidden = false;
+  $('mcstats-big').innerHTML = $('mcstats').innerHTML;
+  MC_VIEW = {i0: 0, i1: MC_LAST_DATA.p50.length - 1};
+  mcRedrawBig();
+}
+(function wireMcZoom() {
+  const c = $('mccanvas-big');
+  const pad = 44;
+  // canvas x (in canvas px) -> fractional checkpoint index, honouring MC_VIEW
+  const xToIndex = clientX => {
+    const rect = c.getBoundingClientRect();
+    const px = (clientX - rect.left) / rect.width * c.width;   // css px -> canvas px
+    const w = c.width - pad * 2;
+    const frac = Math.min(1, Math.max(0, (px - pad) / w));
+    return MC_VIEW.i0 + frac * (MC_VIEW.i1 - MC_VIEW.i0);
+  };
+  c.addEventListener('wheel', e => {
+    if (!MC_LAST_DATA || $('mcdetailwin').hidden) return;
+    e.preventDefault();
+    const N = MC_LAST_DATA.p50.length;
+    const anchor = xToIndex(e.clientX);
+    const factor = e.deltaY < 0 ? 0.8 : 1.25;   // in / out
+    let i0 = anchor - (anchor - MC_VIEW.i0) * factor;
+    let i1 = anchor + (MC_VIEW.i1 - anchor) * factor;
+    // clamp + keep a minimum window of ~4 checkpoints
+    i0 = Math.max(0, i0); i1 = Math.min(N - 1, i1);
+    if (i1 - i0 < 3) return;
+    MC_VIEW = {i0, i1};
+    mcRedrawBig();
+  }, {passive: false});
+  let dragX = null, dragView = null;
+  c.addEventListener('mousedown', e => {
+    if (!MC_LAST_DATA) return;
+    dragX = e.clientX; dragView = {...MC_VIEW}; c.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', e => {
+    if (dragX == null) return;
+    const N = MC_LAST_DATA.p50.length;
+    const rect = c.getBoundingClientRect();
+    const w = c.width - pad * 2;
+    const dpx = (e.clientX - dragX) / rect.width * c.width;
+    let di = -dpx / w * (dragView.i1 - dragView.i0);   // drag right -> earlier
+    let i0 = dragView.i0 + di, i1 = dragView.i1 + di;
+    if (i0 < 0) { i1 -= i0; i0 = 0; }
+    if (i1 > N - 1) { i0 -= (i1 - (N - 1)); i1 = N - 1; }
+    MC_VIEW = {i0: Math.max(0, i0), i1: Math.min(N - 1, i1)};
+    mcRedrawBig();
+  });
+  window.addEventListener('mouseup', () => { dragX = null; c.style.cursor = ''; });
+  c.addEventListener('dblclick', () => {
+    if (!MC_LAST_DATA) return;
+    MC_VIEW = {i0: 0, i1: MC_LAST_DATA.p50.length - 1}; mcRedrawBig();
+  });
+})();
 
 /* ---- load + run ---- */
 async function loadResults(activate = false) {
   const r = await fetch('/api/results');
-  if (!r.ok) { $('empty').hidden = false; return; }
+  if (!r.ok) return;   // no finished jobs yet — Backtests tab's own empty state covers this
   const data = await r.json();
-  $('empty').hidden = true;
   R = data;                                   // config-panel seeding reads this
   openView(data.job_id || 'latest', viewTitle(data), data, activate);
 }
 
 // Render whatever is in the global R (live run OR an archived load).
 function applyResults() {
-  $('empty').hidden = true;
   // (which backtest is open now lives in its own nav tab + the view bar)
   $('loadbanner').style.display = R.loaded_from ? 'inline-block' : 'none';
   if (R.loaded_from)
@@ -2472,7 +2658,7 @@ RELOAD_BTNS.forEach(b => b.onclick = doReloadStrategies);
 /* ---- run history browser ---- */
 let histRuns = [];
 let histSort = {key: 'id', dir: -1};   // newest run first by default
-const HIST_NUM = new Set(['id', 'days', 'pnl', 'return_pct', 'trades', 'win', 'sharpe', 'dd']);
+const HIST_NUM = new Set(['id', 'days', 'pnl', 'return_pct', 'trades', 'trades_total', 'win', 'sharpe', 'dd']);
 
 function histFields(run) {
   const p = run.params || {}, s = run.summary || {};
@@ -2481,6 +2667,7 @@ function histFields(run) {
   return {run, id: run.id, generated: run.generated || '', name: run.name || '',
           strategy: p.strategy || '', tf: p.timeframe || '1m',
           days, pnl: s.pnl, return_pct: s.return_pct, trades: s.trades_closed,
+          trades_total: s.trades_total,
           win: s.win_rate_pct, sharpe: s.sharpe_arithmetic, dd: s.max_drawdown_pct};
 }
 
@@ -2498,7 +2685,7 @@ function renderHistory() {
       .insertAdjacentHTML('afterbegin', '<th class="cmpth"></th>');
   else if (!cmpMode && cmpTh) cmpTh.remove();
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="${cmpMode ? 13 : 12}" class="note" style="padding:20px">${
+    body.innerHTML = `<tr><td colspan="${cmpMode ? 14 : 13}" class="note" style="padding:20px">${
       histRuns.length ? 'no runs match the filter' : 'no runs recorded yet'}</td></tr>`;
     return;
   }
@@ -2509,7 +2696,7 @@ function renderHistory() {
       <td class="num ${r.run.job_id ? 'hasjob' : ''}"
         ${r.run.job_id ? 'title="chart data available (job folder)"' : ''}>${r.id}</td>
       <td>${r.generated.slice(0, 19).replace('T', ' ')}</td>
-      <td title="${escHtml((RUNMETA[histMetaId(r.run)] || {}).note || '')}">${
+      <td class="histname" data-id="${r.id}" title="${escHtml((RUNMETA[histMetaId(r.run)] || {}).note || '')} (double-click to rename)" style="cursor:text">${
         (RUNMETA[histMetaId(r.run)] || {}).favorite ? '<span style="color:var(--amber)">★</span> ' : ''
         }${escHtml(r.name) || '—'}${
         (RUNMETA[histMetaId(r.run)] || {}).note ? ' <span style="color:var(--accent)">✎</span>' : ''}</td>
@@ -2519,6 +2706,7 @@ function renderHistory() {
       <td class="num ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmt(r.pnl)}</td>
       <td class="num">${r.return_pct == null ? '—' : fmt(r.return_pct, 3)}</td>
       <td class="num">${r.trades ?? '—'}</td>
+      <td class="num">${r.trades_total ?? '—'}</td>
       <td class="num">${r.win == null ? '—' : fmt(r.win, 1)}</td>
       <td class="num ${r.sharpe >= 0 ? 'pos' : 'neg'}">${r.sharpe == null ? '—' : fmt(r.sharpe, 3)}</td>
       <td class="num">${r.dd == null ? '—' : fmt(r.dd, 2)}</td>
@@ -2533,6 +2721,16 @@ function renderHistory() {
   });
   body.querySelectorAll('tr[data-id]').forEach(tr =>
     tr.oncontextmenu = ev => showCtxMenu(ev, byId[tr.dataset.id] || {}));
+  body.querySelectorAll('.histname[data-id]').forEach(td => {
+    td.onclick = e => e.stopPropagation();
+    td.ondblclick = e => {
+      e.stopPropagation();
+      const run = byId[td.dataset.id];
+      if (!run) return;
+      renameRun({job_id: run.job_id, archive_tag: run.archive_tag, currentName: run.name || ''},
+        loadHistory);
+    };
+  });
   body.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => {
     if (cmpMode) {
       const cb = tr.querySelector('input[data-cmp]');
@@ -2550,7 +2748,7 @@ function renderHistory() {
       `<span class="chip">window: ${(run.params?.window_start || '').slice(0, 16)} →
        ${(run.params?.window_end || '').slice(0, 16)}</span>`;
     tr.insertAdjacentHTML('afterend',
-      `<tr class="histdetail"><td colspan="${cmpMode ? 12 : 11}">${chips}</td></tr>`);
+      `<tr class="histdetail"><td colspan="${cmpMode ? 13 : 12}">${chips}</td></tr>`);
   });
 }
 
@@ -2563,7 +2761,7 @@ async function loadHistory() {
     renderHistory();
     refreshStamp();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="11" class="note" style="padding:20px">
+    body.innerHTML = `<tr><td colspan="12" class="note" style="padding:20px">
       history unavailable: ${e.message || e}</td></tr>`;
   }
 }
@@ -2930,11 +3128,69 @@ $('repbuild').onclick = () => {
   if (!tags.length) { updateCmpBar(); alert('select at least one run that still has a job or archive folder'); return; }
   buildCompareReport(tags);
 };
+// Open the selected History runs in the Compare TAB (in-app side-by-side)
+// instead of building the external HTML report. The Compare tab is driven by
+// the live job list, so only runs that still have a job folder (present in
+// JOBS) can be shown — archive-only / dismissed / deleted runs are dropped.
+$('cmpintab').onclick = () => {
+  const rows = histRuns.map(histFields).filter(r => cmpSel.has(String(r.id)));
+  const jobIds = rows.map(r => r.run.job_id).filter(id => id && JOBS.some(j => j.id === id));
+  if (jobIds.length < 2) {
+    alert('The Compare tab needs at least 2 runs that still have a job folder.\n'
+      + (jobIds.length === 1 ? 'Only 1 of the selected runs qualifies. ' : 'None of the selected runs qualify. ')
+      + 'Archive-only or removed runs can only go into the external report (build compare report).');
+    return;
+  }
+  COMPARE_SEL = jobIds;
+  setCmpMode(false);        // leave history's select mode
+  switchTab('compare');
+  renderCompare();
+};
 
 /* ---- History row context menu ---- */
 function hideCtx() { $('ctxmenu').hidden = true; }
 document.addEventListener('click', hideCtx);
 document.addEventListener('scroll', hideCtx, true);
+
+/* in-page replacement for window.prompt() — returns a Promise<string|null> */
+function promptModal(label, defaultVal) {
+  return new Promise(resolve => {
+    const m = $('promptmodal'), input = $('promptmodal-input');
+    $('promptmodal-label').textContent = label;
+    input.value = defaultVal || '';
+    m.hidden = false;
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+    const cleanup = result => {
+      m.hidden = true;
+      okBtn.onclick = null; cancelBtn.onclick = null;
+      input.onkeydown = null;
+      resolve(result);
+    };
+    const okBtn = $('promptmodal-ok'), cancelBtn = $('promptmodal-cancel');
+    okBtn.onclick = () => cleanup(input.value);
+    cancelBtn.onclick = () => cleanup(null);
+    input.onkeydown = e => {
+      if (e.key === 'Enter') cleanup(input.value);
+      else if (e.key === 'Escape') cleanup(null);
+    };
+  });
+}
+
+/* lightweight in-page replacement for window.alert() — non-blocking, so it
+   can never leave the page looking frozen the way a stuck/lost native
+   dialog can (which was also blocking the NEXT promptModal from taking
+   input — the reported "second config isn't taking the name" bug). */
+function showToast(msg, kind) {
+  const stack = $('toaststack');
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = `pointer-events:auto;max-width:340px;padding:10px 14px;border-radius:7px;
+    font-size:13px;line-height:1.4;box-shadow:0 4px 16px rgba(0,0,0,.35);
+    background:${kind === 'error' ? 'var(--red, #7a2a2a)' : 'var(--panel,#151922)'};
+    border:1px solid var(--border,#2a3140);color:inherit;`;
+  stack.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
 
 /* ---- generic context menu (used by charts too, see openChartCtxMenu) ---- */
 function openMenu(ev, items) {
@@ -3020,6 +3276,8 @@ function showCtxMenu(ev, run) {
   const meta = RUNMETA[mid] || {};
   mi(meta.favorite ? '★ Unfavourite' : '☆ Favourite', () => toggleFavorite(mid));
   mi(meta.note ? 'Edit note…' : 'Add note…', () => editNote(mid));
+  mi('Save config…', () => saveConfigFromRun((run.params || {}).strategy,
+    (run.params || {}).timeframe, run.params, run.name), !!(run.params || {}).strategy);
   if (run.job_id) {
     mi('Open charts & account (job)', () => viewJob(run.job_id));
     mi('View portfolio Excel…', () => chooseArtifact(
@@ -3057,6 +3315,19 @@ function showCtxMenu(ev, run) {
   } else {
     mi('Portfolio xlsx (archive deleted)', null, false);
   }
+  if (run.id != null) {
+    mi('Delete from postgres', async () => {
+      if (!confirm(`Delete run #${run.id} from postgres (run row, trades, equity, per-symbol)? This does not touch the test_data archive.`)) return;
+      try {
+        const r = await fetch('/api/runs/delete', {method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: run.id})});
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || r.status);
+        loadHistory();
+      } catch (e) { alert('delete failed: ' + (e.message || e)); }
+    }, true, true);
+  }
   m.innerHTML = items.map((it, i) =>
     `<div class="ctxitem ${it.enabled ? '' : 'off'} ${it.danger ? 'danger' : ''}" data-i="${i}">${it.label}</div>`).join('');
   m.querySelectorAll('.ctxitem').forEach(el => el.onclick = e => {
@@ -3071,6 +3342,15 @@ function showCtxMenu(ev, run) {
   m.style.top = Math.min(ev.clientY, window.innerHeight - mh - 10) + 'px';
 }
 
+/* ---- symbol sector/category tags (Layer 1, DeFi, Meme, AI, ...) ---- */
+let SYMCLASS = {};
+async function loadSymbolClasses() {
+  try { SYMCLASS = (await (await fetch('/api/symbol-classes')).json()).classes || {}; }
+  catch (e) { SYMCLASS = {}; }
+}
+// faded pill next to a symbol name, Binance-style category tag
+const symClassTag = sym => `<span class="symtag">${escHtml(SYMCLASS[sym] || 'Other')}</span>`;
+
 /* ---- saved per-strategy/per-timeframe configs ---- */
 let SAVEDCFG = [];
 const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -3084,6 +3364,46 @@ async function cfgAction(payload) {
   if (!r.ok || d.error) throw new Error(d.error || r.status);
   SAVEDCFG = d.configs || [];
   renderConfigsTab();
+}
+
+// Rename a run (job and/or its archive folder) — used by double-clicking a
+// job card's name and a History row's name. `ref` = {job_id?, archive_tag?,
+// currentName?}; `onDone` is called after a successful rename to refresh
+// whichever list is showing.
+async function renameRun(ref, onDone) {
+  let currentName = ref.currentName;
+  if (currentName === undefined && ref.job_id) {
+    const j = JOBS.find(x => x.id === ref.job_id);
+    currentName = j ? (j.name || j.strategy) : '';
+  }
+  const name = await promptModal('Rename this backtest:', currentName || '');
+  if (name === null || !name.trim()) return;
+  try {
+    const r = await fetch('/api/rename', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: ref.job_id, archive_tag: ref.archive_tag, name: name.trim()})});
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    if (onDone) onDone();
+  } catch (e) { showToast('rename failed: ' + (e.message || e), 'error'); }
+}
+
+// Save a config from any run's params — used by the right-click "Save
+// config…" item on both job cards and History rows. `rawParams` may still
+// carry run-specific keys (strategy/timeframe/window_start/window_end/
+// leverage) mixed in, as results.json/history rows do; strip those before
+// saving since only the actual strategy params belong in a reusable config.
+const _CFG_SKIP_KEYS = new Set(['strategy', 'timeframe', 'window_start', 'window_end', 'leverage']);
+async function saveConfigFromRun(strategy, timeframe, rawParams, suggestedName) {
+  if (!strategy) { showToast('no strategy info on this run — cannot save a config.', 'error'); return; }
+  const params = {};
+  for (const [k, v] of Object.entries(rawParams || {})) if (!_CFG_SKIP_KEYS.has(k)) params[k] = v;
+  const name = await promptModal('Save this backtest\'s config as:', suggestedName || (strategy + ' · ' + (timeframe || '1m')));
+  if (name === null || !name.trim()) return;   // cancelled or blank
+  try {
+    await cfgAction({action: 'save', strategy, timeframe: timeframe === '1h' ? '1h' : '1m', name: name.trim(), params});
+    showToast(`Saved "${name.trim()}" to Configs (${strategy} · ${timeframe || '1m'}).`);
+  } catch (e) { showToast('save failed: ' + (e.message || e), 'error'); }
 }
 
 async function loadSavedConfigs() {
@@ -3115,7 +3435,7 @@ function renderConfigsTab() {
         title="use this config when ${escHtml(c.strategy)} + ${c.timeframe} is selected"></td>
       <td>${escHtml(c.strategy)}</td>
       <td>${c.timeframe}</td>
-      <td><b>${escHtml(c.name)}</b></td>
+      <td><b class="cfgname" data-id="${escHtml(c.id)}" title="double-click to rename" style="cursor:text">${escHtml(c.name)}</b></td>
       <td>${(c.saved || '').slice(0, 16).replace('T', ' ')}</td>
       <td class="cfgchips">${chips}</td>
       <td><textarea class="cfgnotes" data-id="${escHtml(c.id)}" rows="2"
@@ -3139,6 +3459,13 @@ function renderConfigsTab() {
       const c = SAVEDCFG.find(x => x.id === el.dataset.id);
       if (confirm(`Delete saved config "${c ? c.name : el.dataset.id}"?`))
         cfgAction({action: 'delete', id: el.dataset.id}).catch(err);
+    });
+  body.querySelectorAll('.cfgname').forEach(el =>
+    el.ondblclick = async () => {
+      const c = SAVEDCFG.find(x => x.id === el.dataset.id);
+      const name = await promptModal('Rename config:', c ? c.name : '');
+      if (name === null || !name.trim()) return;
+      cfgAction({action: 'rename', id: el.dataset.id, name: name.trim()}).catch(err);
     });
   body.querySelectorAll('button[data-act="load"]').forEach(el =>
     el.onclick = async () => {
@@ -3389,14 +3716,10 @@ function renderJobStrats() {           // builder init (name kept for call sites
   };
   $('jobcfgsave').onclick = async () => {
     if (!CFG) return;
-    const name = prompt('Config name (shown in the Configs tab):');
+    const name = await promptModal('Config name (shown in the Configs tab):');
     if (name === null) return;
     const strat = $('jobstrategy').value;
-    const params = {};
-    for (const k of Object.keys(CFG.strategies[strat] || {})) {
-      const el = $('bp_' + k);
-      if (el && el.value.trim() !== '') params[k] = el.value.trim();
-    }
+    const params = collectBuilderParams(strat);
     try {
       await cfgAction({action: 'save', strategy: strat,
                        timeframe: $('jobtf').value, params, name});
@@ -3409,6 +3732,21 @@ function renderJobStrats() {           // builder init (name kept for call sites
   };
   renderJobParams();
   refreshJobCfgPicker();
+}
+
+// Blank builder fields fall back to the strategy's tuned default (shown as
+// the field's placeholder) rather than being OMITTED — a job whose params
+// object is missing a key can't be told apart, downstream (Compare table,
+// sweep heatmap, saved configs), from a job that genuinely has no such
+// param, so those blanks were rendering as "—" instead of the real value.
+function collectBuilderParams(strat, blankOverrides) {
+  const params = {};
+  for (const [k, def] of Object.entries(CFG.strategies[strat] || {})) {
+    const el = $('bp_' + k);
+    const v = el ? el.value.trim() : '';
+    params[k] = v !== '' ? v : (blankOverrides && k in blankOverrides ? blankOverrides[k] : def);
+  }
+  return params;
 }
 
 function renderStaged() {
@@ -3447,13 +3785,14 @@ $('nbtoggle').onclick = () => showBuilder();
 $('stageadd').onclick = () => {
   if (!CFG) { $('stagehint').textContent = 'still loading strategies…'; return; }
   const name = $('jobstrategy').value;
-  const params = {};
-  for (const k of Object.keys(CFG.strategies[name] || {})) {
-    const el = $('bp_' + k);
-    if (el && el.value.trim() !== '') params[k] = el.value.trim();
-  }
-  // "Record additional data" checkbox drives the diag param unless a value
-  // was typed explicitly in the diag field
+  // "Record additional data" / "pyfolio report" checkboxes drive their params
+  // when the corresponding builder field was left blank. They are NOT
+  // registry params for most strategies, so collectBuilderParams (which only
+  // iterates registry keys) won't add them — set them explicitly after.
+  const params = collectBuilderParams(name, {
+    diag: $('jobdiag').checked ? 'true' : 'false',
+    pyfolio_report: $('jobpyfolio').checked ? 'true' : 'false',
+  });
   if (!('diag' in params)) params.diag = $('jobdiag').checked ? 'true' : 'false';
   if (!('pyfolio_report' in params)) params.pyfolio_report = $('jobpyfolio').checked ? 'true' : 'false';
   const runName = $('jobname').value.trim() || null;   // blank -> server defaults it to the run tag
@@ -3590,7 +3929,8 @@ function renderJobs() {
           <span class="jc-stat" title="${METRIC_HELP['ret']}">ret <b>${f2(s.return_pct)}%</b></span>
           <span class="jc-stat" title="${METRIC_HELP['sharpe']}">sharpe <b>${f2(s.sharpe_arithmetic, 2)}</b></span>
           <span class="jc-stat" title="${METRIC_HELP['win']}">win <b>${f2(s.win_rate_pct, 1)}%</b></span>
-          <span class="jc-stat" title="${METRIC_HELP['trades']}">trades <b>${s.trades_closed ?? '—'}</b></span>
+          <span class="jc-stat" title="${METRIC_HELP['positions']}">positions <b>${s.trades_closed ?? '—'}</b></span>
+          <span class="jc-stat" title="${METRIC_HELP['trades']}">trades <b>${s.trades_total ?? '—'}</b></span>
           <span class="jc-stat" title="${METRIC_HELP['maxDD']}">maxDD <b>${f2(s.max_drawdown_pct, 1)}%</b></span>
         </div>
         <div class="jc-artifacts">${artifactBadge('Portfolio', j.has_portfolio_xlsx)}${artifactBadge('Cross-sectional', j.has_crosssectional_xlsx)}</div>`;
@@ -3610,7 +3950,7 @@ function renderJobs() {
     return `<div class="jobcard st-${j.state}${meta.favorite ? ' fav' : ''}" data-id="${j.id}" ${j.state === 'done' ? `data-open="${j.id}" title="click to open charts & account"` : ''}>
       <div class="jc-idblock">
         <div class="jc-head">
-          <span class="jc-strat" title="${j.name ? escHtml(j.name) : ''}">${j.name ? escHtml(j.name) : j.strategy}</span>
+          <span class="jc-strat" data-rename="${j.id}" title="${j.name ? escHtml(j.name) + ' — ' : ''}double-click to rename" style="cursor:text">${j.name ? escHtml(j.name) : j.strategy}</span>
           <span class="jc-ctl">${ctl}</span>
         </div>
         <div class="jc-meta">
@@ -3625,6 +3965,14 @@ function renderJobs() {
       ${mid}
     </div>`;
   }).join('');
+  grid.querySelectorAll('.jc-strat[data-rename]').forEach(el => {
+    el.onclick = e => e.stopPropagation();     // don't open the job card
+    el.ondblclick = e => {
+      e.stopPropagation();
+      const j = JOBS.find(x => x.id === el.dataset.rename);
+      renameRun({job_id: el.dataset.rename, currentName: j ? (j.name || j.strategy) : ''}, pollJobs);
+    };
+  });
   grid.querySelectorAll('.jc-ctlbtn[data-act]').forEach(b => b.onclick = e => {
     e.stopPropagation();                      // don't trigger the card open
     if (b.dataset.act === 'delete' &&
@@ -3642,6 +3990,13 @@ function renderJobs() {
   });
   grid.querySelectorAll('.jobcard[data-open]').forEach(card =>
     card.onclick = () => viewJob(card.dataset.open));
+  grid.querySelectorAll('.jobcard[data-id]').forEach(card => card.oncontextmenu = ev => {
+    const j = JOBS.find(x => x.id === card.dataset.id);
+    if (!j) return;
+    openMenu(ev, [
+      {label: 'Save config…', fn: () => saveConfigFromRun(j.strategy, j.timeframe, j.params, j.name)},
+    ]);
+  });
   // equity sparklines on finished cards
   grid.querySelectorAll('canvas.jc-spark').forEach(cv => {
     const j = JOBS.find(x => x.id === cv.dataset.id);
@@ -3734,7 +4089,8 @@ function updateJobSelectBar() {
 const COMPARE_METRICS = [
   ['PnL', 'pnl', 2, true], ['Return %', 'return_pct', 3, true],
   ['Sharpe', 'sharpe_arithmetic', 3, true], ['Win %', 'win_rate_pct', 1, true],
-  ['Max DD %', 'max_drawdown_pct', 2, false], ['Trades', 'trades_closed', 0, null],
+  ['Max DD %', 'max_drawdown_pct', 2, false],
+  ['Positions', 'trades_closed', 0, null], ['Trades', 'trades_total', 0, null],
 ];
 let COMPARE_SEL = [];   // job ids captured when "Compare →" was pressed
 
@@ -3765,19 +4121,25 @@ function renderCompareTable(jobs) {
     return `<tr><th class="rowh">${label}</th>${cells}</tr>`;
   }).join('');
 
+  // ALL params (defaults included, not just the ones that vary); differing
+  // cells still get the amber highlight so changes stand out at a glance
   const allKeys = [...new Set(jobs.flatMap(j => Object.keys(j.params || {})))].sort();
-  const paramRows = allKeys.filter(k => {
-    const vals = jobs.map(j => String((j.params || {})[k] ?? ''));
-    return new Set(vals).size > 1;
-  }).map(k => {
-    const vals = jobs.map(j => (j.params || {})[k]);
-    const strs = vals.map(v => String(v ?? ''));
-    const majority = strs.length ? strs.sort((a, b) =>
+  const paramRow = (label, vals) => {
+    const strs = vals.map(v => (v == null || v === '') ? '' : String(v));
+    const differ = new Set(strs).size > 1;
+    const majority = strs.length ? strs.slice().sort((a, b) =>
       strs.filter(x => x === a).length - strs.filter(x => x === b).length).pop() : '';
-    const cells = vals.map((v, i) => `<td class="${strs[i] !== majority ? 'differs' : ''}">${
-      v == null ? '—' : escHtml(String(v))}</td>`).join('');
-    return `<tr><th class="rowh">${escHtml(k)}</th>${cells}</tr>`;
-  }).join('');
+    const cells = strs.map(s => `<td class="${differ && s !== majority ? 'differs' : ''}">${
+      s === '' ? '—' : escHtml(s)}</td>`).join('');
+    return `<tr><th class="rowh">${escHtml(label)}</th>${cells}</tr>`;
+  };
+  // backtest period (window dates) as its own formatted row, up top
+  const periodRow = paramRow('Backtest period',
+    jobs.map(j => (j.window_start && j.window_end)
+      ? `${fmtDateTime(j.window_start)} → ${fmtDateTime(j.window_end)}`
+      : (j.timeframe && j.days ? `${j.days}d · ${j.timeframe}` : null)));
+  const paramRows = periodRow + allKeys.map(k =>
+    paramRow(k, jobs.map(j => (j.params || {})[k]))).join('');
 
   box.innerHTML =
     `<div class="jobdiff-head"><b>Compare</b>
@@ -3786,12 +4148,345 @@ function renderCompareTable(jobs) {
        <thead><tr><th></th>${head}</tr></thead>
        <tbody>${metricRows}</tbody>
      </table></div>
-     ${paramRows ? `<div class="posscroll" style="margin-top:14px"><table class="statstable comparetbl">
-       <thead><tr><th>Param (differs)</th>${jobs.map(() => '<th></th>').join('')}</tr></thead>
+     <div class="posscroll" style="margin-top:14px"><table class="statstable comparetbl">
+       <thead><tr><th>Parameters <span class="note" style="font-weight:400">(differences highlighted)</span></th>${jobs.map(() => '<th></th>').join('')}</tr></thead>
        <tbody>${paramRows}</tbody>
-     </table></div>` : '<p class="note" style="margin-top:10px">no differing parameters</p>'}`;
+     </table></div>`;
   box.hidden = false;
 }
+
+// One table at a time (picked via a dropdown, same reasoning as the
+// per-symbol picker) for a class — every symbol of that class pooled into
+// one trade-level line via /api/test/contrib-class, so win rate/Sharpe/max
+// DD are computed correctly rather than averaged across the class's symbols.
+let CLASSCOMPARE_CACHE = {};   // job id -> contrib-class rows
+async function fetchContribClass(jid) {
+  if (CLASSCOMPARE_CACHE[jid]) return CLASSCOMPARE_CACHE[jid];
+  let rows = [];
+  try { rows = (await (await fetch('/api/test/contrib-class/' + encodeURIComponent(jid))).json()).rows || []; }
+  catch (e) { /* leave empty */ }
+  rows.forEach(r => { r.total = (r.pnl || 0) + (r.unrealised || 0); });
+  CLASSCOMPARE_CACHE[jid] = rows;
+  return rows;
+}
+let COMPARE_CLASS_JOBS = [];
+let COMPARE_CLASS_BYCLASS = {};
+let COMPARE_CLASS = null;
+async function renderClassCompare(jobs) {
+  const box = $('comparebyclass');
+  if (!box) return;
+  if (jobs.length < 2) { box.hidden = true; return; }
+  const gen = ++renderClassCompare._gen;
+  const perJob = await Promise.all(jobs.map(j => fetchContribClass(j.id)));
+  if (gen !== renderClassCompare._gen) return;
+  const byClass = {};
+  jobs.forEach((j, i) => perJob[i].forEach(r => {
+    (byClass[r.cls] = byClass[r.cls] || Array(jobs.length).fill(null))[i] = r;
+  }));
+  COMPARE_CLASS_JOBS = jobs;
+  COMPARE_CLASS_BYCLASS = byClass;
+  const classes = Object.keys(byClass).sort();
+  if (!classes.length) {
+    box.innerHTML = `<div class="jobdiff-head"><b>By class</b></div>
+      <p class="note">no per-symbol position logs for these runs (job folder missing or archive-only).</p>`;
+    box.hidden = false;
+    $('classsweepview').innerHTML = '';
+    return;
+  }
+  if (!COMPARE_CLASS || !byClass[COMPARE_CLASS]) COMPARE_CLASS = classes[0];
+  const options = classes.map(c =>
+    `<option value="${escHtml(c)}" ${c === COMPARE_CLASS ? 'selected' : ''}>${escHtml(c)}</option>`).join('');
+  box.innerHTML = `<div class="jobdiff-head"><b>By class</b>
+      <span class="note">${classes.length} classes</span>
+      <select id="compareclasssel" style="margin-left:auto">${options}</select></div>
+    <div id="compareclasstbl"></div>`;
+  box.hidden = false;
+  $('compareclasssel').onchange = e => {
+    COMPARE_CLASS = e.target.value;
+    renderOneClassCompare();
+    renderClassHeatmap();
+  };
+  renderOneClassCompare();
+  renderClassHeatmap();
+}
+renderClassCompare._gen = 0;
+
+function renderOneClassCompare() {
+  const holder = $('compareclasstbl');
+  if (!holder) return;
+  const jobs = COMPARE_CLASS_JOBS, cls = COMPARE_CLASS;
+  const row = COMPARE_CLASS_BYCLASS[cls];
+  if (!row) { holder.innerHTML = '<p class="note">no data for this class.</p>'; return; }
+  const symsUnion = [...new Set(row.filter(Boolean).flatMap(r => r.symbols))].sort();
+  const head = jobs.map(j => `<th>${j.name ? escHtml(j.name) : j.strategy}</th>`).join('');
+  const rows = SYM_COMPARE_METRICS.map(([label, key, dp, better]) => {
+    const vals = jobs.map((j, i) => row[i] ? row[i][key] : null);
+    const nums = vals.filter(v => typeof v === 'number');
+    let bestV = null, worstV = null;
+    if (better != null && nums.length > 1 && new Set(nums).size > 1) {
+      bestV = better ? Math.max(...nums) : Math.min(...nums);
+      worstV = better ? Math.min(...nums) : Math.max(...nums);
+    }
+    const cells = vals.map(v => {
+      const c = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
+      return `<td class="num ${c}">${v == null ? '—' : fmt(v, dp)}</td>`;
+    }).join('');
+    return `<tr><th class="rowh">${label}</th>${cells}</tr>`;
+  }).join('');
+  holder.innerHTML = `<div class="symcomparetbl">
+    <div class="jobdiff-head" style="margin-bottom:4px"><b>${escHtml(cls)}</b>
+      <span class="note" title="${escHtml(symsUnion.join(', '))}">${symsUnion.length} symbols</span></div>
+    <div class="posscroll"><table class="statstable comparetbl">
+      <thead><tr><th></th>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>`;
+}
+
+// Class-scoped mirror of the metric heatmap — same batch (varying param)
+// grouping, colored/labeled by the chosen class's pooled PnL/Win%/Sharpe/etc
+// (from /api/test/contrib-class) instead of the run's overall numbers.
+async function renderClassHeatmap() {
+  const box = $('classsweepview');
+  if (!box) return;
+  const cls = COMPARE_CLASS;
+  const metric = $('sweepmetric').value;
+  const skey = SYM_SWEEP_KEY[metric];
+  if (!cls || !skey) { box.innerHTML = ''; return; }
+  const sweeps = buildSweeps(COMPARE_CLASS_JOBS.length >= 2 ? COMPARE_CLASS_JOBS : null);
+  if (!sweeps.length) { box.innerHTML = ''; return; }
+  const gen = ++renderClassHeatmap._gen;
+  const allJobs = [...new Set(sweeps.flatMap(sw => sw.js))];
+  const rowsByJob = {};
+  await Promise.all(allJobs.map(async j => { rowsByJob[j.id] = await fetchContribClass(j.id); }));
+  if (gen !== renderClassHeatmap._gen) return;
+  const mv = j => {
+    const r = (rowsByJob[j.id] || []).find(x => x.cls === cls);
+    return r ? r[skey] : null;
+  };
+  box.innerHTML = `<div class="jobdiff-head" style="margin-top:18px"><b>Per-class heatmap</b>
+      <span class="note">${escHtml(cls)} · same batches as above, ${SWEEP_METRICS[metric]}</span></div>` +
+    sweeps.map(sw => {
+      const [strat, tf, days] = sw.key.split('|');
+      const title = `${escHtml(strat)} · ${tf} · ${days}d`;
+      if (sw.tooMany)
+        return `<div class="sweep"><div class="sweep-h">${title}</div>
+          <p class="note">${sw.varying.length} params vary — too many for a 2-D grid.</p></div>`;
+      const vals = sw.js.map(mv).filter(v => typeof v === 'number');
+      if (!vals.length)
+        return `<div class="sweep"><div class="sweep-h">${title}</div>
+          <p class="note">no symbols of class ${escHtml(cls)} were traded in any of these runs.</p></div>`;
+      const lo = Math.min(...vals), hi = Math.max(...vals);
+      const good = v => {
+        if (typeof v !== 'number' || hi === lo) return .5;
+        const t = (v - lo) / (hi - lo);
+        return metric === 'max_drawdown_pct' ? 1 - t : t;
+      };
+      const cell = (j, tip) => {
+        const v = j ? mv(j) : null;
+        return `<td class="sweep-cell" ${j ? `data-open="${j.id}"` : ''}
+          title="${tip} · ${escHtml(cls)} ${SWEEP_METRICS[metric]} ${v == null ? '—' : fmt(v, 3)}"
+          style="background:${v == null ? 'transparent' : sweepColor(good(v))}">${v == null ? '' : fmt(v, 2)}</td>`;
+      };
+      if (sw.varying.length === 1) {
+        const kx = sw.varying[0];
+        const xs = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[kx])))]);
+        const cells = xs.map(xv => cell(sw.js.find(j => String((j.params || {})[kx]) === xv), escHtml(kx + '=' + xv))).join('');
+        return `<div class="sweep"><div class="sweep-h">${title} · <b>${escHtml(kx)}</b></div>
+          <div class="posscroll"><table class="sweep-tbl">
+            <thead><tr><th></th>${xs.map(x => `<th>${escHtml(x)}</th>`).join('')}</tr></thead>
+            <tbody><tr><th>${SWEEP_METRICS[metric]}</th>${cells}</tr></tbody></table></div></div>`;
+      }
+      const [kx, ky] = sw.varying;
+      const xs = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[kx])))]);
+      const ys = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[ky])))]);
+      const rows = ys.map(yv => {
+        const cells = xs.map(xv => cell(
+          sw.js.find(j => String((j.params || {})[kx]) === xv && String((j.params || {})[ky]) === yv),
+          escHtml(kx + '=' + xv + ', ' + ky + '=' + yv))).join('');
+        return `<tr><th>${escHtml(yv)}</th>${cells}</tr>`;
+      }).join('');
+      return `<div class="sweep"><div class="sweep-h">${title} · <b>${escHtml(kx)}</b> × <b>${escHtml(ky)}</b></div>
+        <div class="posscroll"><table class="sweep-tbl">
+          <thead><tr><th>${escHtml(ky)}\\${escHtml(kx)}</th>${xs.map(x => `<th>${escHtml(x)}</th>`).join('')}</tr></thead>
+          <tbody>${rows}</tbody></table></div></div>`;
+    }).join('');
+  box.querySelectorAll('[data-open]').forEach(el => el.onclick = () => viewJob(el.dataset.open));
+}
+renderClassHeatmap._gen = 0;
+
+// Per-symbol version of the same comparison table, one per symbol that any
+// selected job actually traded, grouped by sector/category tag. Reuses each
+// job's /api/test/contrib data (full per-symbol position logs), so this only
+// works for jobs with a job folder still on disk.
+let SYMCOMPARE_CACHE = {};   // job id -> contrib rows
+async function fetchContrib(jid) {
+  if (SYMCOMPARE_CACHE[jid]) return SYMCOMPARE_CACHE[jid];
+  let rows = [];
+  try { rows = (await (await fetch('/api/test/contrib/' + encodeURIComponent(jid))).json()).rows || []; }
+  catch (e) { /* leave empty */ }
+  rows.forEach(r => { r.total = (r.pnl || 0) + (r.unrealised || 0); });
+  SYMCOMPARE_CACHE[jid] = rows;
+  return rows;
+}
+const SYM_COMPARE_METRICS = [
+  ['Realised', 'pnl', 2, true], ['Unrealised', 'unrealised', 2, true],
+  ['Total', 'total', 2, true], ['Positions', 'trades', 0, null],
+  ['Win %', 'win_rate', 1, true], ['Sharpe', 'sharpe', 3, true],
+  ['Max DD', 'max_dd', 2, false],
+];
+// One symbol at a time (picked via a dropdown) instead of every symbol
+// stacked at once — showing all of them pushed the param heatmap way down
+// the page for jobs with dozens of symbols.
+let COMPARE_SYM_JOBS = [];    // last jobs list rendered, so the <select> handler can re-render
+let COMPARE_SYM_BYSYM = {};   // symbol -> [contrib row or null per job], from the last render
+let COMPARE_SYM = null;       // currently chosen symbol
+async function renderSymbolCompare(jobs) {
+  const box = $('comparesymbols');
+  if (!box) return;
+  if (jobs.length < 2) { box.hidden = true; return; }
+  const gen = ++renderSymbolCompare._gen;   // guard against out-of-order async renders
+  const perJob = await Promise.all(jobs.map(j => fetchContrib(j.id)));
+  if (gen !== renderSymbolCompare._gen) return;
+  const bySym = {};
+  jobs.forEach((j, i) => perJob[i].forEach(r => {
+    (bySym[r.symbol] = bySym[r.symbol] || Array(jobs.length).fill(null))[i] = r;
+  }));
+  COMPARE_SYM_JOBS = jobs;
+  COMPARE_SYM_BYSYM = bySym;
+  const syms = Object.keys(bySym).sort();
+  if (!syms.length) {
+    box.innerHTML = `<div class="jobdiff-head"><b>Per-symbol comparison</b></div>
+      <p class="note">no per-symbol position logs for these runs (job folder missing or archive-only).</p>`;
+    box.hidden = false;
+    $('symsweepview').innerHTML = '';
+    return;
+  }
+  if (!COMPARE_SYM || !bySym[COMPARE_SYM]) COMPARE_SYM = syms[0];
+  const groups = {};
+  syms.forEach(s => (groups[SYMCLASS[s] || 'Other'] ||= []).push(s));
+  const options = Object.keys(groups).sort().map(cls =>
+    `<optgroup label="${escHtml(cls)}">${groups[cls].map(s =>
+      `<option value="${escHtml(s)}" ${s === COMPARE_SYM ? 'selected' : ''}>${escHtml(s)}</option>`).join('')}</optgroup>`
+  ).join('');
+  box.innerHTML = `<div class="jobdiff-head"><b>Per-symbol comparison</b>
+      <span class="note">${syms.length} symbols · ${Object.keys(groups).length} classes</span>
+      <select id="comparesymsel" style="margin-left:auto">${options}</select></div>
+    <div id="comparesymtbl"></div>`;
+  box.hidden = false;
+  $('comparesymsel').onchange = e => {
+    COMPARE_SYM = e.target.value;
+    renderOneSymbolCompare();
+    renderSymbolHeatmap();
+  };
+  renderOneSymbolCompare();
+  renderSymbolHeatmap();
+}
+renderSymbolCompare._gen = 0;
+
+function renderOneSymbolCompare() {
+  const holder = $('comparesymtbl');
+  if (!holder) return;
+  const jobs = COMPARE_SYM_JOBS, sym = COMPARE_SYM;
+  const row = COMPARE_SYM_BYSYM[sym];
+  if (!row) { holder.innerHTML = '<p class="note">no data for this symbol.</p>'; return; }
+  const head = jobs.map(j => `<th>${j.name ? escHtml(j.name) : j.strategy}</th>`).join('');
+  const rows = SYM_COMPARE_METRICS.map(([label, key, dp, better]) => {
+    const vals = jobs.map((j, i) => row[i] ? row[i][key] : null);
+    const nums = vals.filter(v => typeof v === 'number');
+    let bestV = null, worstV = null;
+    if (better != null && nums.length > 1 && new Set(nums).size > 1) {
+      bestV = better ? Math.max(...nums) : Math.min(...nums);
+      worstV = better ? Math.min(...nums) : Math.max(...nums);
+    }
+    const cells = vals.map(v => {
+      const c = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
+      return `<td class="num ${c}">${v == null ? '—' : fmt(v, dp)}</td>`;
+    }).join('');
+    return `<tr><th class="rowh">${label}</th>${cells}</tr>`;
+  }).join('');
+  holder.innerHTML = `<div class="symcomparetbl">
+    <div class="jobdiff-head" style="margin-bottom:4px"><b>${escHtml(sym)}</b> ${symClassTag(sym)}</div>
+    <div class="posscroll"><table class="statstable comparetbl">
+      <thead><tr><th></th>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>`;
+}
+
+// Symbol-scoped mirror of the metric heatmap below — same batch (varying
+// param) grouping, but colored/labeled by the chosen symbol's own PnL/Win
+// %/Sharpe/etc instead of the run's overall numbers.
+const SYM_SWEEP_KEY = {
+  sharpe_arithmetic: 'sharpe', pnl: 'pnl', win_rate_pct: 'win_rate',
+  max_drawdown_pct: 'max_dd', trades_closed: 'trades', trades_total: 'trades',
+};
+async function renderSymbolHeatmap() {
+  const box = $('symsweepview');
+  if (!box) return;
+  const sym = COMPARE_SYM;
+  const metric = $('sweepmetric').value;
+  const skey = SYM_SWEEP_KEY[metric];
+  if (!sym || !skey) { box.innerHTML = ''; return; }
+  const sweeps = buildSweeps(COMPARE_SYM_JOBS.length >= 2 ? COMPARE_SYM_JOBS : null);
+  if (!sweeps.length) { box.innerHTML = ''; return; }
+  const gen = ++renderSymbolHeatmap._gen;
+  const allJobs = [...new Set(sweeps.flatMap(sw => sw.js))];
+  const rowsByJob = {};
+  await Promise.all(allJobs.map(async j => { rowsByJob[j.id] = await fetchContrib(j.id); }));
+  if (gen !== renderSymbolHeatmap._gen) return;
+  const mv = j => {
+    const r = (rowsByJob[j.id] || []).find(x => x.symbol === sym);
+    return r ? r[skey] : null;
+  };
+  box.innerHTML = `<div class="jobdiff-head" style="margin-top:18px"><b>Per-symbol heatmap</b>
+      <span class="note">${escHtml(sym)} · same batches as above, ${SWEEP_METRICS[metric]}</span></div>` +
+    sweeps.map(sw => {
+      const [strat, tf, days] = sw.key.split('|');
+      const title = `${escHtml(strat)} · ${tf} · ${days}d`;
+      if (sw.tooMany)
+        return `<div class="sweep"><div class="sweep-h">${title}</div>
+          <p class="note">${sw.varying.length} params vary — too many for a 2-D grid.</p></div>`;
+      const vals = sw.js.map(mv).filter(v => typeof v === 'number');
+      if (!vals.length)
+        return `<div class="sweep"><div class="sweep-h">${title}</div>
+          <p class="note">${escHtml(sym)} wasn't traded in any of these runs.</p></div>`;
+      const lo = Math.min(...vals), hi = Math.max(...vals);
+      const good = v => {
+        if (typeof v !== 'number' || hi === lo) return .5;
+        const t = (v - lo) / (hi - lo);
+        return metric === 'max_drawdown_pct' ? 1 - t : t;
+      };
+      const cell = (j, tip) => {
+        const v = j ? mv(j) : null;
+        return `<td class="sweep-cell" ${j ? `data-open="${j.id}"` : ''}
+          title="${tip} · ${escHtml(sym)} ${SWEEP_METRICS[metric]} ${v == null ? '—' : fmt(v, 3)}"
+          style="background:${v == null ? 'transparent' : sweepColor(good(v))}">${v == null ? '' : fmt(v, 2)}</td>`;
+      };
+      if (sw.varying.length === 1) {
+        const kx = sw.varying[0];
+        const xs = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[kx])))]);
+        const cells = xs.map(xv => cell(sw.js.find(j => String((j.params || {})[kx]) === xv), escHtml(kx + '=' + xv))).join('');
+        return `<div class="sweep"><div class="sweep-h">${title} · <b>${escHtml(kx)}</b></div>
+          <div class="posscroll"><table class="sweep-tbl">
+            <thead><tr><th></th>${xs.map(x => `<th>${escHtml(x)}</th>`).join('')}</tr></thead>
+            <tbody><tr><th>${SWEEP_METRICS[metric]}</th>${cells}</tr></tbody></table></div></div>`;
+      }
+      const [kx, ky] = sw.varying;
+      const xs = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[kx])))]);
+      const ys = sweepSortVals([...new Set(sw.js.map(j => String((j.params || {})[ky])))]);
+      const rows = ys.map(yv => {
+        const cells = xs.map(xv => cell(
+          sw.js.find(j => String((j.params || {})[kx]) === xv && String((j.params || {})[ky]) === yv),
+          escHtml(kx + '=' + xv + ', ' + ky + '=' + yv))).join('');
+        return `<tr><th>${escHtml(yv)}</th>${cells}</tr>`;
+      }).join('');
+      return `<div class="sweep"><div class="sweep-h">${title} · <b>${escHtml(kx)}</b> × <b>${escHtml(ky)}</b></div>
+        <div class="posscroll"><table class="sweep-tbl">
+          <thead><tr><th>${escHtml(ky)}\\${escHtml(kx)}</th>${xs.map(x => `<th>${escHtml(x)}</th>`).join('')}</tr></thead>
+          <tbody>${rows}</tbody></table></div></div>`;
+    }).join('');
+  box.querySelectorAll('[data-open]').forEach(el => el.onclick = () => viewJob(el.dataset.open));
+}
+renderSymbolHeatmap._gen = 0;
 
 // main Compare renderer: uses COMPARE_SEL when set (≥2), else auto-detects
 // every sweep. A table always renders for any ≥2 selection, REGARDLESS of
@@ -3803,10 +4498,16 @@ function renderCompare() {
   if (sel.length >= 2) {
     hint.hidden = true;
     renderCompareTable(sel);
+    renderClassCompare(sel);
+    renderSymbolCompare(sel);
     renderSweeps(sel);
   } else {
     hint.hidden = false;
     $('comparediff').hidden = true;
+    $('comparebyclass').hidden = true;
+    $('comparesymbols').hidden = true;
+    $('classsweepview').innerHTML = '';
+    $('symsweepview').innerHTML = '';
     renderSweeps(null);
   }
 }
@@ -3814,7 +4515,8 @@ function renderCompare() {
 /* ---- parameter sweep bars / heatmaps ---- */
 const SWEEP_METRICS = {
   sharpe_arithmetic: 'Sharpe', pnl: 'PnL', return_pct: 'Return %',
-  win_rate_pct: 'Win %', max_drawdown_pct: 'Max DD %', trades_closed: 'Trades',
+  win_rate_pct: 'Win %', max_drawdown_pct: 'Max DD %',
+  trades_closed: 'Positions', trades_total: 'Trades',
 };
 function sweepColor(t) {              // 0=red · .5=neutral · 1=green
   const L = (a, b, x) => Math.round(a + (b - a) * x);
@@ -4008,8 +4710,10 @@ setInterval(pollJobs, 3000);
 const TEST_STATS = [
   ['PnL', 'pnl', v => fmt(v) + ' USDT', true],
   ['Return', 'return_pct', v => fmt(v, 3) + '%', true],
+  ['Unrealised', 'unrealised_pnl', v => fmt(v) + ' USDT', true],
   ['Win rate', 'win_rate_pct', v => fmt(v, 1) + '%', false],
-  ['Trades', 'trades_closed', v => v, false],
+  ['Positions', 'trades_closed', v => v, false],
+  ['Trades', 'trades_total', v => v, false],
 ];
 let testR = null;
 
@@ -4098,12 +4802,16 @@ async function loadTestingJob(id) {
     : '<tr><td class="note">No portfolio statistics available for this run.</td></tr>';
   drawLineCanvas($('testequity'), (testR.equity || []).map(e => e[1]), true);
   loadContrib(id, isArchive);
+  loadContribClass(id, isArchive);
   // reset Monte Carlo (compute-on-demand, per selected run)
   if ($('mcstats')) {
     $('mcstats').textContent = isArchive
       ? 'Archived runs don\'t store the trade list — Monte Carlo needs a live job.'
       : 'Click Run to bootstrap this run\'s trade sequence into a confidence cone.';
-    drawMonteCarlo(null);
+    MC_LAST_DATA = null;
+    $('mcexpand').disabled = true;
+    $('mcdetailwin').hidden = true;
+    drawMonteCarlo(null, $('mccanvas'));
   }
 }
 
@@ -4127,31 +4835,102 @@ async function loadContrib(id, isArchive) {
   contribSort = {key: 'pnl', dir: -1};
   renderContrib();
 }
+
+/* ---- by-class contribution (same job, symbols pooled by sector tag) ---- */
+let contribClassRows = [], contribClassSort = {key: 'pnl', dir: -1};
+async function loadContribClass(id, isArchive) {
+  const box = $('testcontribclass');
+  if (isArchive) {
+    box.innerHTML = '<p class="note">By-class breakdown needs the job\'s position logs — not stored for archived runs.</p>';
+    return;
+  }
+  box.innerHTML = '<p class="note">loading…</p>';
+  let d;
+  try { d = await (await fetch('/api/test/contrib-class/' + encodeURIComponent(id))).json(); }
+  catch (e) { box.innerHTML = '<p class="note">could not load by-class breakdown.</p>'; return; }
+  if (d.error || !(d.rows || []).length) {
+    box.innerHTML = `<p class="note">${escHtml(d.error || 'no per-symbol data')}</p>`;
+    return;
+  }
+  contribClassRows = d.rows;
+  contribClassSort = {key: 'pnl', dir: -1};
+  renderContribClass();
+}
+const CONTRIB_CLASS_COLS = [
+  ['cls', 'Class', false], ['trades', 'Positions', true],
+  ['pnl', 'Realised', true], ['unrealised', 'Unrealised', true],
+  ['total', 'Total', true], ['win_rate', 'Win %', true],
+  ['sharpe', 'Sharpe', true], ['max_dd', 'Max DD', true],
+];
+function renderContribClass() {
+  const box = $('testcontribclass');
+  contribClassRows.forEach(r => { r.total = (r.pnl || 0) + (r.unrealised || 0); });
+  const rows = contribClassRows.slice().sort((a, b) =>
+    cmpVal(a[contribClassSort.key], b[contribClassSort.key]) * contribClassSort.dir);
+  const tot = contribClassRows.reduce((s, r) => s + (r.pnl || 0), 0);
+  const totUnreal = contribClassRows.reduce((s, r) => s + (r.unrealised || 0), 0);
+  const winners = contribClassRows.filter(r => r.pnl > 0).length;
+  const head = CONTRIB_CLASS_COLS.map(([k, label, num]) =>
+    `<th class="${num ? 'num' : ''}" data-key="${k}">${label}${contribClassSort.key === k ? (contribClassSort.dir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join('');
+  const sc = v => v >= 0 ? 'pos' : 'neg';
+  const body = rows.map(r => `<tr>
+    <td title="${escHtml(r.symbols.join(', '))}">${escHtml(r.cls)} <span class="note">(${r.symbols.length})</span></td>
+    <td class="num">${r.trades}</td>
+    <td class="num ${sc(r.pnl)}">${fmt(r.pnl)}</td>
+    <td class="num ${r.unrealised ? sc(r.unrealised) : ''}">${r.unrealised ? fmt(r.unrealised) : '—'}</td>
+    <td class="num ${sc(r.total)}">${fmt(r.total)}</td>
+    <td class="num">${fmt(r.win_rate, 1)}%</td>
+    <td class="num ${r.sharpe == null ? '' : sc(r.sharpe)}">${r.sharpe == null ? '—' : fmt(r.sharpe, 2)}</td>
+    <td class="num neg">${fmt(r.max_dd)}</td>
+  </tr>`).join('');
+  const unrealNote = totUnreal ? ` · <span class="${sc(totUnreal)}">unreal ${fmt(totUnreal)}</span>` : '';
+  box.innerHTML =
+    `<div class="poshead"><b>${contribClassRows.length} classes</b>
+       <span class="${tot >= 0 ? 'pos' : 'neg'}">realised ${fmt(tot)} USDT</span>${unrealNote}
+       <span class="note">${winners} up · ${contribClassRows.length - winners} down · Unrealised = MTM of open positions · click a header to sort · hover a class for its symbols</span></div>
+     <div class="posscroll"><table id="contribclasstbl">
+       <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  box.querySelector('#contribclasstbl thead').onclick = e => {
+    const th = e.target.closest('th[data-key]');
+    if (!th) return;
+    const key = th.dataset.key;
+    contribClassSort = {key, dir: contribClassSort.key === key ? -contribClassSort.dir : (key === 'cls' ? 1 : -1)};
+    renderContribClass();
+  };
+}
 const CONTRIB_COLS = [
-  ['symbol', 'Symbol', false], ['trades', 'Trades', true],
-  ['pnl', 'Net PnL', true], ['win_rate', 'Win %', true],
+  ['symbol', 'Symbol', false], ['trades', 'Positions', true],
+  ['pnl', 'Realised', true], ['unrealised', 'Unrealised', true],
+  ['total', 'Total', true], ['win_rate', 'Win %', true],
   ['sharpe', 'Sharpe', true], ['max_dd', 'Max DD', true],
 ];
 function renderContrib() {
   const box = $('testcontrib');
+  // realised + open-position mark-to-market; `total` is derived so it can be sorted
+  contribRows.forEach(r => { r.total = (r.pnl || 0) + (r.unrealised || 0); });
   const rows = contribRows.slice().sort((a, b) =>
     cmpVal(a[contribSort.key], b[contribSort.key]) * contribSort.dir);
   const tot = contribRows.reduce((s, r) => s + (r.pnl || 0), 0);
+  const totUnreal = contribRows.reduce((s, r) => s + (r.unrealised || 0), 0);
   const winners = contribRows.filter(r => r.pnl > 0).length;
   const head = CONTRIB_COLS.map(([k, label, num]) =>
     `<th class="${num ? 'num' : ''}" data-key="${k}">${label}${contribSort.key === k ? (contribSort.dir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join('');
+  const sc = v => v >= 0 ? 'pos' : 'neg';
   const body = rows.map(r => `<tr>
-    <td>${escHtml(r.symbol)}</td>
+    <td>${escHtml(r.symbol)} ${symClassTag(r.symbol)}</td>
     <td class="num">${r.trades}</td>
-    <td class="num ${r.pnl >= 0 ? 'pos' : 'neg'}">${fmt(r.pnl)}</td>
+    <td class="num ${sc(r.pnl)}">${fmt(r.pnl)}</td>
+    <td class="num ${r.unrealised ? sc(r.unrealised) : ''}">${r.unrealised ? fmt(r.unrealised) : '—'}</td>
+    <td class="num ${sc(r.total)}">${fmt(r.total)}</td>
     <td class="num">${fmt(r.win_rate, 1)}%</td>
-    <td class="num ${r.sharpe == null ? '' : r.sharpe >= 0 ? 'pos' : 'neg'}">${r.sharpe == null ? '—' : fmt(r.sharpe, 2)}</td>
+    <td class="num ${r.sharpe == null ? '' : sc(r.sharpe)}">${r.sharpe == null ? '—' : fmt(r.sharpe, 2)}</td>
     <td class="num neg">${fmt(r.max_dd)}</td>
   </tr>`).join('');
+  const unrealNote = totUnreal ? ` · <span class="${sc(totUnreal)}">unreal ${fmt(totUnreal)}</span>` : '';
   box.innerHTML =
     `<div class="poshead"><b>${contribRows.length} symbols</b>
-       <span class="${tot >= 0 ? 'pos' : 'neg'}">net ${fmt(tot)} USDT</span>
-       <span class="note">${winners} up · ${contribRows.length - winners} down · click a header to sort</span></div>
+       <span class="${tot >= 0 ? 'pos' : 'neg'}">realised ${fmt(tot)} USDT</span>${unrealNote}
+       <span class="note">${winners} up · ${contribRows.length - winners} down · Unrealised = MTM of positions still open at end · click a header to sort</span></div>
      <div class="posscroll"><table id="contribtbl">
        <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   box.querySelector('#contribtbl thead').onclick = e => {
@@ -4419,7 +5198,7 @@ function renderIC(d) {
 
 
 // Load config + last results, then seed the panel with the last run's params.
-Promise.all([loadConfig(), loadResults(), loadSavedConfigs(), loadRunMeta()]).then(() => {
+Promise.all([loadConfig(), loadResults(), loadSavedConfigs(), loadRunMeta(), loadSymbolClasses()]).then(() => {
   renderJobStrats();          // backtests tab is the default view
   renderJobs();               // re-render with favourites/notes once meta is in
 });

@@ -12,6 +12,8 @@ import plotly.io as pio
 from plotly.subplots import make_subplots
 
 import _paths
+import symbol_classes
+import pnl_stats
 DATA_DIR = os.path.join(_paths.ROOT, 'datas')
 OUT_DIR = os.path.join(_paths.ROOT, 'report_out')
 SYMBOL_PREF = 'ETHUSDT'
@@ -140,8 +142,12 @@ def run_strategy(label, Strat, params, feeds, color, compression=1):
     if diag is not None:
         innov = diag['innov'].to_numpy(float)
         rms = round(float(np.sqrt(np.mean(innov ** 2))), 4)
+    # 'trades' = closed position lifecycles ("Positions" in the dashboard);
+    # 'trades_total' = individual order fills (entries + scale-in adds +
+    # exits) — the two only diverge when a strategy adds to an open position.
     stats = dict(end_value=round(end, 2), pnl=round(end - START_CASH, 2),
-                 trades=len(tl), wins=wins,
+                 trades=len(tl), trades_total=sum(len(v) for v in strat.executed.values()),
+                 wins=wins,
                  win_rate=round(100.0 * wins / len(tl), 2) if tl else 0.0,
                  innov_rms=rms)
     return dict(name=label, diag=diag, equity=eq, stats=stats, color=color)
@@ -259,9 +265,12 @@ def fig_winpnl(results):
     return fig
 
 
+_SUMMARY_LABELS = {'trades': 'positions', 'trades_total': 'trades'}
+
+
 def summary_table(results):
-    cols = ['end_value', 'pnl', 'trades', 'wins', 'win_rate', 'innov_rms']
-    head = ''.join('<th>%s</th>' % c for c in cols)
+    cols = ['end_value', 'pnl', 'trades', 'trades_total', 'wins', 'win_rate']
+    head = ''.join('<th>%s</th>' % _SUMMARY_LABELS.get(c, c) for c in cols)
     body = ''
     for res in results:
         s = res['stats']
@@ -279,7 +288,8 @@ _PSTAT_ROWS = [
     ('End value (USDT)',        'end_value',                    lambda v: '%.2f' % v),
     ('PnL (USDT)',              'pnl',                          lambda v: '%+.2f' % v),
     ('Return %',                'return_pct',                   lambda v: '%+.3f%%' % v),
-    ('Trades',                  'trades_closed',                lambda v: '%d' % v),
+    ('Positions',                'trades_closed',                lambda v: '%d' % v),
+    ('Trades',                  'trades_total',                 lambda v: '%d' % v),
     ('Win rate %',              'win_rate_pct',                 lambda v: '%.1f%%' % v),
     ('Max drawdown %',          'max_drawdown_pct',             lambda v: '%.2f%%' % v),
     ('Ann. return (CAGR)',      'annual_return_cagr',           lambda v: '%+.2f%%' % (100*v)),
@@ -316,15 +326,31 @@ def stats_table(results):
 
 def _sym_compare_html(runs):
     """Interactive per-symbol compare for runs that carry job chartdata: a
-    symbol dropdown drives one subplot row per run (price + every stored
-    indicator/prediction line, disclaimer: downsampled)."""
+    symbol dropdown drives a per-run stats table (PnL/positions/win rate/
+    Sharpe/max DD from the position logs) plus one subplot row per run
+    (price + every stored indicator/prediction line, disclaimer:
+    downsampled)."""
     runs = [r for r in runs if r.get('symdata')]
     if not runs:
         return ''
-    syms = sorted(set().union(*[set(r['symdata']) for r in runs]))
+    syms = sorted(set().union(*[set(r['symdata']) for r in runs],
+                              *[set(r.get('symstats') or {}) for r in runs]))
     if not syms:
         return ''
+    # is there ANY additional (diag) series to toggle? if not, say so instead
+    # of showing a checkbox that silently does nothing
+    has_addl = any(L.get('additional')
+                   for r in runs for e in r['symdata'].values()
+                   for L in e.get('lines', []))
+    addl_ctl = ("""
+  <label style="margin-left:14px;font-size:13px;color:#8a97ad;cursor:pointer">
+    <input type="checkbox" id="symaddl"> show additional (diag) data
+  </label>""" if has_addl else """
+  <label style="margin-left:14px;font-size:13px;color:#5a657a" title="none of the compared runs recorded per-bar filter internals — run with 'Record additional data' checked to get them">
+    <input type="checkbox" id="symaddl" disabled> show additional (diag) data (none recorded)
+  </label>""")
     payload = json.dumps({r['name']: r['symdata'] for r in runs})
+    statspayload = json.dumps({r['name']: (r.get('symstats') or {}) for r in runs})
     meta = json.dumps([{'name': r['name'], 'color': r['color']} for r in runs])
     options = ''.join('<option>%s</option>' % s for s in syms)
     run_checks = ''.join(
@@ -334,20 +360,44 @@ def _sym_compare_html(runs):
         for r in runs)
     return """
 <h2>Per-symbol compare</h2>
-<p class="note">One panel per run · drag to zoom.</p>
+<p class="note">Stats from the full position logs · one chart panel per run · drag to zoom.</p>
 <p>
   <select id="symsel" style="background:#1b2536;color:#e7edf5;border:1px solid #243048;
-   border-radius:6px;padding:6px 10px;font-size:14px">%s</select>
-  <label style="margin-left:14px;font-size:13px;color:#8a97ad;cursor:pointer">
-    <input type="checkbox" id="symaddl"> show additional (diag) data
-  </label>
+   border-radius:6px;padding:6px 10px;font-size:14px">%s</select>%s
 </p>
 <p id="symrunpicker">%s</p>
+<div id="symstatstbl"></div>
 <div id="symcmp"></div>
 <script>
 const SYMDATA = %s;
+const SYMSTATS = %s;
 const SYMRUNS = %s;
+const SYMMETRICS = [['Realised','pnl',2],['Unrealised','unrealised',2],['Total','total',2],
+                    ['Positions','trades',0],['Win %%','win_rate',1],
+                    ['Sharpe','sharpe',3],['Max DD','max_dd',2]];
+function symStatsTable(sym) {
+  const shown = new Set([...document.querySelectorAll('.symruncb:checked')].map(el => el.dataset.run));
+  const runs = SYMRUNS.filter(r => shown.has(r.name));
+  const rows = runs.map(r => (SYMSTATS[r.name] || {})[sym] || null);
+  if (!rows.some(Boolean)) { document.getElementById('symstatstbl').innerHTML = ''; return; }
+  const fmtc = (v, dp) => v == null ? '\\u2014' : Number(v).toFixed(dp);
+  const head = '<tr><th></th>' + runs.map(r => '<th>' + r.name + '</th>').join('') + '</tr>';
+  const body = SYMMETRICS.map(([label, key, dp]) => {
+    const vals = rows.map(r => r ? r[key] : null);
+    const nums = vals.filter(v => typeof v === 'number');
+    let bestV = null, worstV = null;
+    if (nums.length > 1 && new Set(nums).size > 1) { bestV = Math.max(...nums); worstV = Math.min(...nums); }
+    const cells = vals.map(v => {
+      const cls = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
+      return '<td class="' + cls + '">' + fmtc(v, dp) + '</td>';
+    }).join('');
+    return '<tr><th class="rowh">' + label + '</th>' + cells + '</tr>';
+  }).join('');
+  document.getElementById('symstatstbl').innerHTML =
+    '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
 function drawSym(sym) {
+  symStatsTable(sym);
   const showAddl = document.getElementById('symaddl').checked;
   const shown = new Set([...document.querySelectorAll('.symruncb:checked')].map(el => el.dataset.run));
   const traces = [], names = [];
@@ -385,7 +435,69 @@ document.getElementById('symaddl').onchange = () => drawSym(document.getElementB
 document.querySelectorAll('.symruncb').forEach(cb =>
   cb.onchange = () => drawSym(document.getElementById('symsel').value));
 drawSym(document.getElementById('symsel').value);
-</script>""" % (options, run_checks, payload, meta)
+</script>""" % (options, addl_ctl, run_checks, payload, statspayload, meta)
+
+
+_CLASS_METRICS = [('Realised', 'pnl', 2), ('Unrealised', 'unrealised', 2),
+                  ('Total', 'total', 2), ('Positions', 'trades', 0),
+                  ('Win %', 'win_rate', 1), ('Sharpe', 'sharpe', 3),
+                  ('Max DD', 'max_dd', 2)]
+
+
+def _class_compare_html(runs):
+    """Per-class P&L compare (job runs only — needs position logs): a class
+    dropdown drives one table, same metrics/coloring as the per-symbol
+    contribution tables in the dashboard, with every symbol of that class
+    pooled into one trade-level line."""
+    runs = [r for r in runs if r.get('classdata')]
+    if not runs:
+        return ''
+    classes = sorted(set().union(*[set(r['classdata']) for r in runs]))
+    if not classes:
+        return ''
+    payload = json.dumps({r['name']: r['classdata'] for r in runs})
+    names = json.dumps([r['name'] for r in runs])
+    metrics = json.dumps(_CLASS_METRICS)
+    options = ''.join('<option>%s</option>' % html.escape(c) for c in classes)
+    return """
+<h2>By class</h2>
+<p class="note">Every symbol of a sector/category (Layer 1, DeFi, Meme, ...) pooled into one
+trade-level line, so win rate/Sharpe/max DD are computed correctly rather than averaged
+across the class's symbols. Job runs only (needs position logs).</p>
+<p>
+  <select id="classsel" style="background:#1b2536;color:#e7edf5;border:1px solid #243048;
+   border-radius:6px;padding:6px 10px;font-size:14px">%s</select>
+</p>
+<div id="classcmp"></div>
+<script>
+const CLASSDATA = %s;
+const CLASSRUNS = %s;
+const CLASSMETRICS = %s;
+function fmtc(v, dp) { return v == null ? '\\u2014' : Number(v).toFixed(dp); }
+function drawClass(cls) {
+  const rows = CLASSRUNS.map(name => (CLASSDATA[name] || {})[cls] || null);
+  const symsUnion = [...new Set(rows.filter(Boolean).flatMap(r => r.symbols))].sort();
+  let head = '<tr><th></th>' + CLASSRUNS.map(n => '<th>' + n + '</th>').join('') + '</tr>';
+  let body = CLASSMETRICS.map(([label, key, dp]) => {
+    const vals = rows.map(r => r ? r[key] : null);
+    const nums = vals.filter(v => typeof v === 'number');
+    let bestV = null, worstV = null;
+    if (nums.length > 1 && new Set(nums).size > 1) {
+      bestV = Math.max(...nums); worstV = Math.min(...nums);
+    }
+    const cells = vals.map(v => {
+      const cls2 = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
+      return '<td class="' + cls2 + '">' + fmtc(v, dp) + '</td>';
+    }).join('');
+    return '<tr><th class="rowh">' + label + '</th>' + cells + '</tr>';
+  }).join('');
+  document.getElementById('classcmp').innerHTML =
+    '<p class="note">' + symsUnion.length + ' symbols: ' + symsUnion.join(', ') + '</p>' +
+    '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+}
+document.getElementById('classsel').onchange = e => drawClass(e.target.value);
+drawClass(document.getElementById('classsel').value);
+</script>""" % (options, payload, names, metrics)
 
 
 def div(fig, first=False):
@@ -458,40 +570,57 @@ def _render_page(results, subtitle):
     tfs = sorted({str((r.get('params') or {}).get('timeframe', '1m')) for r in results})
     tf_note = '<p class="note">Bars: %s.</p>' % ', '.join(tfs)
 
+    # (label, html) — label is used for the jump-to-section index; sections
+    # without a real heading (disclaimers, the params table's own <h2> is
+    # inline in cfg_lines) pass '' and are skipped by the index.
     parts = [
-        summary_table(results),
-        stats_table(results),   # full portfolio-stats compare (archived runs)
-        tf_note,
-        cfg_lines,
-        '<p class="note">Hover for values · drag to zoom · double-click to reset.</p>',
-        '<h2>Win rate &amp; PnL</h2>' + div(fig_winpnl(results), first=True),
-        '<h2>Equity curve</h2>' + div(fig_equity(results)),
-        _sym_compare_html(results),   # jobs with chartdata only; '' otherwise
+        ('Summary', summary_table(results)),
+        ('Portfolio stats', stats_table(results)),   # full compare (archived runs)
+        ('', tf_note),
+        ('Parameters', cfg_lines),
+        ('', '<p class="note">Hover for values · drag to zoom · double-click to reset.</p>'),
+        ('Win rate & PnL', '<h2>Win rate &amp; PnL</h2>' + div(fig_winpnl(results), first=True)),
+        ('Equity curve', '<h2>Equity curve</h2>' + div(fig_equity(results))),
+        ('By class', _class_compare_html(results)),   # jobs with position logs only; '' otherwise
+        ('Per-symbol compare', _sym_compare_html(results)),   # jobs w/ chartdata only; '' otherwise
     ]
     if with_diag:
         parts += [
-            '<h2>Prediction &amp; confidence bands</h2>'
-            '<p class="note">Drag-select to zoom into the prediction line and band.</p>'
-            + div(fig_pred(with_diag)),
-            '<h2>Innovation &amp; its uncertainty</h2>'
-            '<p class="note">Prediction error, and the filter\'s expected error (√S).</p>'
-            + div(fig_innov(with_diag)),
-            '<h2>Covariance matrix P</h2>'
-            '<p class="note">Post-warmup steady state · autoscale to see the initial transient.</p>',
+            ('Prediction & confidence bands',
+             '<h2>Prediction &amp; confidence bands</h2>'
+             '<p class="note">Drag-select to zoom into the prediction line and band.</p>'
+             + div(fig_pred(with_diag))),
+            ('Innovation & uncertainty',
+             '<h2>Innovation &amp; its uncertainty</h2>'
+             '<p class="note">Prediction error, and the filter\'s expected error (√S).</p>'
+             + div(fig_innov(with_diag))),
+            ('Covariance matrix P',
+             '<h2>Covariance matrix P</h2>'
+             '<p class="note">Post-warmup steady state · autoscale to see the initial transient.</p>'),
         ]
         for res in with_diag:
-            parts.append('<h3>%s</h3>' % res['name'] + div(fig_P(res)))
+            parts.append(('', '<h3>%s</h3>' % res['name'] + div(fig_P(res))))
 
     names = ' vs '.join(r['name'] for r in results)
-    # each logical block gets its own bordered card so sections read as
-    # distinct panels instead of one continuous scroll
-    body = '\n'.join('<section class="rpt-sec">%s</section>' % p for p in parts if p)
-    html = TEMPLATE.format(symbol=subtitle, span=span, names=names,
-                           bars=len(ref), body=body)
+    # each logical block gets its own bordered card (and, if labeled, an
+    # anchor id for the jump-to-section index) so sections read as distinct
+    # panels instead of one continuous scroll
+    sections, toc = [], []
+    for i, (label, p) in enumerate(parts):
+        if not p:
+            continue
+        sec_id = 'sec-%d' % i
+        sections.append('<section class="rpt-sec" id="%s">%s</section>' % (sec_id, p))
+        if label:
+            toc.append('<a href="#%s">%s</a>' % (sec_id, html.escape(label)))
+    body = '\n'.join(sections)
+    toc_html = '<nav class="rpt-toc"><b>Jump to:</b> ' + ' &nbsp;·&nbsp; '.join(toc) + '</nav>' if toc else ''
+    page_html = TEMPLATE.format(symbol=subtitle, span=span, names=names,
+                                bars=len(ref), body=body, toc=toc_html)
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, 'index.html')
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(html)
+        f.write(page_html)
     print('[report] wrote %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
 
 
@@ -540,6 +669,64 @@ def _job_symdata(chart_dir, per_symbol=None, max_symbols=MAX_SYMDATA_SYMBOLS):
     return out
 
 
+def _read_unrealised(pdir):
+    """{symbol: unrealised_mtm} from the run's unrealised.json sidecar (one
+    level up from the positions/ dir). Empty when absent."""
+    path = os.path.join(os.path.dirname(pdir.rstrip(r'\/')), 'unrealised.json')
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _job_symstats(pdir):
+    """{symbol: {trades, pnl, unrealised, total, win_rate, sharpe, max_dd}}
+    for one job, from its positions/<SYMBOL>.csv logs (+ unrealised.json for
+    open-position MTM) — same trade-level math the dashboard's per-symbol
+    contribution table uses. `total` = realised pnl + unrealised."""
+    if not os.path.isdir(pdir):
+        return None
+    by_sym = pnl_stats.read_position_pnls(pdir)
+    unreal = _read_unrealised(pdir)
+    if not by_sym and not unreal:
+        return None
+    out = {}
+    for sym in set(by_sym) | set(unreal):
+        st = pnl_stats.pnl_stats(by_sym.get(sym, []))
+        st['unrealised'] = round(float(unreal.get(sym, 0.0)), 4)
+        st['total'] = round((st.get('pnl') or 0.0) + st['unrealised'], 4)
+        out[sym] = st
+    return out
+
+
+def _job_classdata(pdir):
+    """{class: {trades, pnl, unrealised, total, win_rate, sharpe, max_dd,
+    symbols}} for one job, from its positions/<SYMBOL>.csv logs (+
+    unrealised.json), pooling symbols by sector tag."""
+    if not os.path.isdir(pdir):
+        return None
+    by_sym = pnl_stats.read_position_pnls(pdir)
+    unreal = _read_unrealised(pdir)
+    if not by_sym and not unreal:
+        return None
+    by_class = {}
+    class_syms = {}
+    class_unreal = {}
+    for sym in set(by_sym) | set(unreal):
+        cls = symbol_classes.classify(sym)
+        by_class.setdefault(cls, []).extend(by_sym.get(sym, []))
+        class_syms.setdefault(cls, []).append(sym)
+        class_unreal[cls] = class_unreal.get(cls, 0.0) + float(unreal.get(sym, 0.0))
+    out = {}
+    for cls, pnls in by_class.items():
+        st = dict(symbols=sorted(class_syms[cls]), **pnl_stats.pnl_stats(pnls))
+        st['unrealised'] = round(class_unreal.get(cls, 0.0), 4)
+        st['total'] = round((st.get('pnl') or 0.0) + st['unrealised'], 4)
+        out[cls] = st
+    return out
+
+
 def build_from_folders(tags):
     import run_backtest
     import _paths
@@ -559,6 +746,8 @@ def build_from_folders(tags):
             symdata = _job_symdata(os.path.join(jdir, jid, 'chartdata'),
                                    per_symbol=snap.get('per_symbol'))
             label_tag = jid
+            classdata = _job_classdata(os.path.join(jdir, jid, 'positions'))
+            symstats = _job_symstats(os.path.join(jdir, jid, 'positions'))
         else:
             snap_path = os.path.join(tdir, tag, 'run.json')
             if not os.path.exists(snap_path):
@@ -568,13 +757,16 @@ def build_from_folders(tags):
                 snap = json.load(f)
             symdata = None
             label_tag = tag
+            classdata = None   # archived runs don't keep per-symbol position logs
+            symstats = None
         p, s = snap.get('params', {}), snap.get('summary', {})
         eq = pd.DataFrame(snap.get('equity', []), columns=['dt', 'value'])
         if eq.empty:
             continue
         eq['dt'] = pd.to_datetime(eq['dt']); eq = eq.set_index('dt')
         stats = dict(end_value=s.get('end_value'), pnl=s.get('pnl'),
-                     trades=s.get('trades_closed'), wins=s.get('won'),
+                     trades=s.get('trades_closed'), trades_total=s.get('trades_total'),
+                     wins=s.get('won'),
                      win_rate=s.get('win_rate_pct'), innov_rms=None)
         # prefer the run's friendly name (defaults to the run tag/job id
         # itself when none was given, so this is never blank)
@@ -582,6 +774,8 @@ def build_from_folders(tags):
         results.append(dict(name=label, diag=None, equity=eq, stats=stats,
                             summary=s,                # full stats comparison
                             symdata=symdata,          # job chartdata (or None)
+                            classdata=classdata,      # per-class pnl stats (or None)
+                            symstats=symstats,        # per-symbol pnl stats (or None)
                             color=PALETTE[i % len(PALETTE)], params=p))
     if not results:
         raise ValueError('no runs with usable snapshots selected')
@@ -625,6 +819,9 @@ TEMPLATE = """<!doctype html>
   .lookup-bar input:focus {{ outline:1px solid var(--accent); }}
   .lookup-hint {{ color:var(--muted); font-size:.8rem; margin:6px 0 0; }}
   .rpt-sec.rpt-dim {{ opacity:.25; }}
+  .rpt-toc {{ font-size:.85rem; color:var(--muted); margin:0 0 14px; line-height:1.9; }}
+  .rpt-toc a {{ color:var(--accent); text-decoration:none; }}
+  .rpt-toc a:hover {{ text-decoration:underline; }}
 </style></head>
 <body><div class="wrap">
 <header>
@@ -635,6 +832,7 @@ TEMPLATE = """<!doctype html>
   <input type="search" id="rptlookup" placeholder="Search this report (section titles, params, symbols)…" autocomplete="off">
   <p class="lookup-hint" id="rptlookuphint"></p>
 </div>
+{toc}
 {body}
 <script>
 (function() {{

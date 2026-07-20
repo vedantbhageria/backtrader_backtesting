@@ -59,10 +59,15 @@ CREATE TABLE IF NOT EXISTS bars_1h (
 CREATE TABLE IF NOT EXISTS runs (
     id            serial PRIMARY KEY,
     generated     timestamptz NOT NULL DEFAULT now(),
+    run_tag       text,
     params        jsonb,
     summary       jsonb,
     pyfolio_stats jsonb
 );
+-- runs predating the run_tag column (added for durable artifact linking —
+-- timestamp matching cross-linked parallel runs that finished microseconds
+-- apart); NULL run_tag rows fall back to timestamp matching
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS run_tag text;
 
 CREATE TABLE IF NOT EXISTS trades (
     run_id  integer REFERENCES runs(id) ON DELETE CASCADE,
@@ -198,6 +203,17 @@ def clear_run_history(conn):
     conn.commit()
 
 
+def delete_run(conn, run_id):
+    """Remove one run (and its trades/equity/per_symbol rows) from postgres."""
+    with conn.cursor() as cur:
+        for tbl in ('trades', 'equity', 'per_symbol'):
+            cur.execute('DELETE FROM %s WHERE run_id=%%s' % tbl, (run_id,))
+        cur.execute('DELETE FROM runs WHERE id=%s', (run_id,))
+        deleted = cur.rowcount
+    conn.commit()
+    return deleted > 0
+
+
 def per_symbol_span(conn, interval='1m'):
 
     tbl = _bars_table(interval)
@@ -262,9 +278,10 @@ def save_run(conn, results, trade_log, equity):
     """Persist one backtest run (results.json content + full trade/equity)."""
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO runs (generated, params, summary, pyfolio_stats) "
-            "VALUES (%s, %s, %s, %s) RETURNING id",
-            (results['generated'], Json(results['params']),
+            "INSERT INTO runs (generated, run_tag, params, summary, pyfolio_stats) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (results['generated'], results.get('run_tag'),
+             Json(results['params']),
              Json(results['summary']),
              Json(results.get('pyfolio', {}).get('stats') or {})))
         run_id = cur.fetchone()[0]
@@ -298,11 +315,11 @@ def save_run(conn, results, trade_log, equity):
 def list_runs(conn, limit=50):
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, generated, params, summary FROM runs "
+            "SELECT id, generated, run_tag, params, summary FROM runs "
             "ORDER BY id DESC LIMIT %s", (limit,))
-        return [{'id': i, 'generated': g.isoformat(),
+        return [{'id': i, 'generated': g.isoformat(), 'run_tag': rt,
                  'params': p, 'summary': s}
-                for i, g, p, s in cur.fetchall()]
+                for i, g, rt, p, s in cur.fetchall()]
 
 
 if __name__ == '__main__':

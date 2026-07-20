@@ -24,6 +24,8 @@ import AccelerationKalmanFilter
 import EMAlgoTest
 import EMAlgoNonLinTest
 import run_backtest
+import symbol_classes
+import pnl_stats
 
 BASE = _paths.ROOT                 # data/artifacts live at project root
 REPORTS = os.path.join(BASE, 'reports')
@@ -302,10 +304,17 @@ async def build_comparison_report(request: Request):
     selections = payload.get('strategies') or None
     if selections is not None and not isinstance(selections, list):
         selections = None
-    # 'compare old tests' mode: list of archived run tags to compare instead
+    # 'compare old tests' mode: list of archived run tags to compare instead.
+    # dedupe (order-preserving) — the History table can hand back the same
+    # tag twice (e.g. a job and its archive both selected, or a stale
+    # postgres row still pointing at an already-picked job/archive), and a
+    # duplicate tag renders as a duplicated run in the comparison report.
     tags = payload.get('tags') or None
     if tags is not None and not isinstance(tags, list):
         tags = None
+    if tags:
+        seen = set()
+        tags = [t for t in tags if not (t in seen or seen.add(t))]
     timeframe = payload.get('timeframe') if payload.get('timeframe') in ('1m', '1h') else '1m'
     try:
         days = int(payload.get('days') or 0) or None   # None -> full history
@@ -512,37 +521,61 @@ _gen2job: dict = {}       # job id -> generated
 
 def _gen_key(iso):
     """Timezone-proof matching key for a 'generated' timestamp: postgres
-    returns it localized (+05:30) while run.json/results.json store UTC."""
+    returns it localized (+05:30) while run.json/results.json store UTC.
+    Full microsecond precision — parallel jobs can finish mere microseconds
+    apart, and a coarser key (this used to round to ms) made two such runs
+    collide onto ONE links entry, cross-linking a History row to the wrong
+    job folder (wrong name/charts, duplicated runs in compare reports)."""
     if not iso:
         return None
     try:
-        return round(datetime.fromisoformat(str(iso)).timestamp(), 3)
+        return round(datetime.fromisoformat(str(iso)).timestamp(), 6)
     except (TypeError, ValueError):
         return str(iso)
 
 
+_job2tag: dict = {}       # job id -> run_tag (from its results.json)
+
+
 def _folder_links():
-    """{generated_key: {'archive_tag':…, 'job_id':…}} so history rows
-    (postgres) can be tied back to their artifact folders."""
-    links = {}
+    """Two link maps so history rows (postgres) can be tied back to their
+    artifact folders: by run_tag (exact — new rows store it) and by
+    generated-timestamp key (fallback for rows predating the run_tag
+    column). The archive folder's NAME is the run_tag itself."""
+    links = {}       # gen_key -> {'archive_tag':…, 'job_id':…}
+    tag_links = {}   # run_tag -> {'archive_tag':…, 'job_id':…}
     tdir = run_backtest.TEST_DATA_DIR
     for tag in (os.listdir(tdir) if os.path.isdir(tdir) else []):
+        if not os.path.isdir(os.path.join(tdir, tag)):
+            continue
+        tag_links.setdefault(tag, {})['archive_tag'] = tag
         if tag not in _gen2archive:
             snap = _read_json(os.path.join(tdir, tag, 'run.json'))
             _gen2archive[tag] = _gen_key((snap or {}).get('generated'))
         g = _gen2archive[tag]
-        if g and os.path.isdir(os.path.join(tdir, tag)):
+        if g:
             links.setdefault(g, {})['archive_tag'] = tag
     with _jobs_lock:
         done = [m['id'] for m in _jobs.values() if m['state'] == 'done']
     for jid in done:
-        if jid not in _gen2job:
+        if jid not in _gen2job or jid not in _job2tag:
             res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
             _gen2job[jid] = _gen_key((res or {}).get('generated'))
-        g = _gen2job[jid]
-        if g and os.path.isfile(os.path.join(JOBS_DIR, jid, 'results.json')):
-            links.setdefault(g, {})['job_id'] = jid
-    return links
+            _job2tag[jid] = (res or {}).get('run_tag')
+        if not os.path.isfile(os.path.join(JOBS_DIR, jid, 'results.json')):
+            continue
+        if _job2tag.get(jid):
+            tag_links.setdefault(_job2tag[jid], {})['job_id'] = jid
+        if _gen2job[jid]:
+            links.setdefault(_gen2job[jid], {})['job_id'] = jid
+    return links, tag_links
+
+
+@app.get('/api/symbol-classes')
+def symbol_classes_api():
+    """{symbol: class} tags (Layer 1, DeFi, Meme, AI, ...) for every symbol
+    this project trades — mirrors Binance's small faded category tag."""
+    return {'classes': symbol_classes.SYMBOL_CLASS}
 
 
 @app.get('/api/runs')
@@ -558,9 +591,15 @@ def runs_history(limit: int = 500):
     except Exception as e:
         return JSONResponse({'error': 'database unavailable: %s' % e},
                             status_code=503)
-    links = _folder_links()
+    links, tag_links = _folder_links()
     for r in out:
-        r.update(links.get(_gen_key(r.get('generated')), {}))
+        # exact run_tag link when the row has one (all new rows store it);
+        # timestamp fallback only for legacy rows without it
+        rt = r.get('run_tag')
+        if rt:
+            r.update(tag_links.get(rt, {}))
+        else:
+            r.update(links.get(_gen_key(r.get('generated')), {}))
         jid, tag = r.get('job_id'), r.get('archive_tag')
         artifact_dirs = []
         if jid:
@@ -600,6 +639,30 @@ async def delete_testdata(request: Request):
     if not os.path.isdir(p):
         return JSONResponse({'error': 'no such archive'}, status_code=404)
     shutil.rmtree(p, ignore_errors=True)
+    return {'ok': True}
+
+
+@app.post('/api/runs/delete')
+async def delete_run_row(request: Request):
+    """Delete ONE run row (and its trades/equity/per_symbol) from postgres.
+    Does not touch reports/test_data/<tag> — pair with /api/testdata/delete
+    to remove both."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    try:
+        run_id = int(payload.get('id'))
+    except (TypeError, ValueError):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    import db
+    conn = db.get_conn()
+    try:
+        ok = db.delete_run(conn, run_id)
+    finally:
+        conn.close()
+    if not ok:
+        return JSONResponse({'error': 'no such run'}, status_code=404)
     return {'ok': True}
 
 
@@ -715,6 +778,14 @@ async def modify_configs(request: Request):
             if hit is None:
                 return JSONResponse({'error': 'unknown config id'}, status_code=404)
             hit['notes'] = str(payload.get('notes') or '')[:2000]
+        elif action == 'rename':
+            hit = next((c for c in items if c['id'] == payload.get('id')), None)
+            if hit is None:
+                return JSONResponse({'error': 'unknown config id'}, status_code=404)
+            name = str(payload.get('name') or '').strip()[:80]
+            if not name:
+                return JSONResponse({'error': 'name required'}, status_code=400)
+            hit['name'] = name
         elif action == 'delete':
             items = [c for c in items if c['id'] != payload.get('id')]
         else:
@@ -940,8 +1011,9 @@ def _jobs_tick():
                                 spark=[round(v, 2) for v in eq[::step]][:60],
                                 summary={k: res.get('summary', {}).get(k) for k in
                                          ('pnl', 'return_pct', 'trades_closed',
-                                          'win_rate_pct', 'sharpe_arithmetic',
-                                          'max_drawdown_pct')})
+                                          'trades_total', 'unrealised_pnl',
+                                          'open_positions', 'win_rate_pct',
+                                          'sharpe_arithmetic', 'max_drawdown_pct')})
                 else:
                     meta.update(state='error', phase='error',
                                 error=st.get('error') or 'process exited unexpectedly')
@@ -987,14 +1059,37 @@ def _job_artifact_flags(jid, state):
     res = _read_json(os.path.join(d, 'results.json'))
     if res and res.get('name'):
         out['name'] = res['name']
+    # summary keys added after a job's card summary was mirrored (trades_total,
+    # unrealised_pnl, ...) won't be in the persisted meta for OLD done jobs —
+    # backfill them here from results.json so the card shows them without a
+    # re-run. list_jobs merges this over the meta summary.
+    if res:
+        full = res.get('summary') or {}
+        out['_summary_extra'] = {k: full.get(k) for k in
+                                 ('trades_total', 'unrealised_pnl', 'open_positions')
+                                 if k in full}
+        # the resolved backtest window (not in the submitted job params) — the
+        # Compare tab shows it as a formatted period row
+        rp = res.get('params') or {}
+        for k in ('window_start', 'window_end'):
+            if rp.get(k):
+                out[k] = rp[k]
     return out
 
 
 @app.get('/api/jobs')
 def list_jobs():
     with _jobs_lock:
-        jobs = [dict(m, **_job_artifact_flags(m['id'], m['state']))
-                for m in _jobs.values() if not m.get('dismissed')]
+        jobs = []
+        for m in _jobs.values():
+            if m.get('dismissed'):
+                continue
+            flags = _job_artifact_flags(m['id'], m['state'])
+            extra = flags.pop('_summary_extra', None)
+            job = dict(m, **flags)
+            if extra:
+                job['summary'] = dict(m.get('summary') or {}, **extra)
+            jobs.append(job)
         return {'jobs': jobs, 'max_parallel': MAX_PARALLEL_JOBS}
 
 
@@ -1073,6 +1168,54 @@ async def job_action(request: Request):
     return {'ok': True}
 
 
+def _write_json(path, obj):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(obj, f, indent=1, default=str)
+
+
+@app.post('/api/rename')
+async def rename_run(request: Request):
+    """Rename a backtest run. Pass job_id and/or archive_tag (a run can have
+    both, or an archive-only History row after its job folder was deleted) —
+    every place that stores the friendly name gets patched so it stays
+    consistent across the job card, History, and Compare."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    name = str(payload.get('name') or '').strip()[:200]
+    if not name:
+        return JSONResponse({'error': 'name required'}, status_code=400)
+    jid = payload.get('job_id')
+    tag = payload.get('archive_tag')
+    if not jid and not tag:
+        return JSONResponse({'error': 'job_id or archive_tag required'}, status_code=400)
+    touched = False
+    if jid:
+        with _jobs_lock:
+            meta = _jobs.get(jid)
+            if meta is not None:
+                meta['name'] = name
+                _jobs_save()
+                touched = True
+        rp = os.path.join(JOBS_DIR, jid, 'results.json')
+        res = _read_json(rp)
+        if res is not None:
+            res['name'] = name
+            _write_json(rp, res)
+            touched = True
+    if tag:
+        rp = os.path.join(run_backtest.TEST_DATA_DIR, tag, 'run.json')
+        res = _read_json(rp)
+        if res is not None:
+            res['name'] = name
+            _write_json(rp, res)
+            touched = True
+    if not touched:
+        return JSONResponse({'error': 'no such job/archive'}, status_code=404)
+    return {'ok': True, 'name': name}
+
+
 @app.post('/api/history/clear')
 async def clear_history(request: Request):
     """what='tests': wipe reports/test_data archives + the postgres run
@@ -1133,29 +1276,38 @@ def _safe_job_id(jid):
 
 
 def _cache_gen_key(jid):
-    """Remember a job's 'generated' key in _gen2job before its folder is
+    """Remember a job's run_tag + 'generated' key before its folder is
     deleted, so _archive_for_job can still find the matching test_data
     archive afterwards (results.json won't be readable anymore)."""
-    if jid in _gen2job:
+    if jid in _gen2job and jid in _job2tag:
         return
     res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json')) or {}
     key = _gen_key(res.get('generated'))
     if key:
         _gen2job[jid] = key
+    if res.get('run_tag'):
+        _job2tag[jid] = res['run_tag']
 
 
 def _archive_for_job(jid):
     """Find the test_data archive belonging to a completed job, if present.
-    Falls back to the _gen2job cache when the job folder (and its
-    results.json) has already been deleted."""
+    The archive folder's name IS the run's run_tag, so that's an exact
+    match; generated-timestamp scan is kept only as a fallback for old job
+    folders whose results.json predates the run_tag field. Uses the
+    _gen2job/_job2tag caches when the job folder has been deleted."""
     res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
+    tdir = run_backtest.TEST_DATA_DIR
+    run_tag = (res or {}).get('run_tag') or _job2tag.get(jid)
+    if run_tag:
+        p = os.path.join(tdir, run_tag)
+        return p if os.path.isdir(p) else None
     key = _gen_key(res.get('generated')) if res else _gen2job.get(jid)
-    if not key or not os.path.isdir(run_backtest.TEST_DATA_DIR):
+    if not key or not os.path.isdir(tdir):
         return None
-    for tag in os.listdir(run_backtest.TEST_DATA_DIR):
-        snap = _read_json(os.path.join(run_backtest.TEST_DATA_DIR, tag, 'run.json')) or {}
+    for tag in os.listdir(tdir):
+        snap = _read_json(os.path.join(tdir, tag, 'run.json')) or {}
         if _gen_key(snap.get('generated')) == key:
-            return os.path.join(run_backtest.TEST_DATA_DIR, tag)
+            return os.path.join(tdir, tag)
     return None
 
 
@@ -1325,63 +1477,73 @@ def download_portfolio(jid: str):
 
 
 # ---- testing hub: cross-sectional analytics on a finished job -------------
+_read_position_pnls = pnl_stats.read_position_pnls
+_pnl_stats = pnl_stats.pnl_stats
+
+
+def _read_unrealised(jid):
+    """{symbol: unrealised_mtm} for positions open at the end of the run
+    (written by run_backtest as unrealised.json). Empty when absent — runs
+    predating the feature, or runs that ended flat."""
+    return _read_json(os.path.join(JOBS_DIR, jid, 'unrealised.json')) or {}
+
+
 @app.get('/api/test/contrib/{jid}')
 def per_symbol_contribution(jid: str):
     """Per-symbol P&L attribution for one job, from its FULL (uncapped)
     per-symbol position logs in reports/jobs/<jid>/positions/<SYMBOL>.csv.
-    Each symbol: closed-trade count, total net pnl, win rate, a trade-level
-    Sharpe (mean/std of per-trade net pnl, ×√n — dimensionless, not
-    annualized), and the max drawdown of the running cumulative net pnl (in
-    USDT). Sorted by total pnl descending."""
+    Each symbol: closed-trade count, total net (realised) pnl, win rate, a
+    trade-level Sharpe (mean/std of per-trade net pnl, ×√n — dimensionless,
+    not annualized), the max drawdown of the running cumulative net pnl (in
+    USDT), and `unrealised` = mark-to-market of any position still open at
+    the end (realised + unrealised should reconcile to the run's total).
+    Sorted by total realised pnl descending."""
     if not _safe_job_id(jid):
         return JSONResponse({'error': 'bad id'}, status_code=400)
     pdir = os.path.join(JOBS_DIR, jid, 'positions')
     if not os.path.isdir(pdir):
         return JSONResponse({'error': 'job has no per-symbol position logs'},
                             status_code=404)
-    import csv as _csv
-    import math as _math
+    by_sym = _read_position_pnls(pdir)
+    unreal = _read_unrealised(jid)
+    # a symbol can end holding an open position without ever closing one, so
+    # union both key sets
     rows = []
-    for fn in os.listdir(pdir):
-        if not fn.endswith('.csv'):
-            continue
-        sym = fn[:-4]
-        pnls = []
-        try:
-            with open(os.path.join(pdir, fn), newline='', encoding='utf-8') as f:
-                for r in _csv.DictReader(f):
-                    try:
-                        pnls.append(float(r.get('pnlcomm') or 0.0))
-                    except (TypeError, ValueError):
-                        pass
-        except OSError:
-            continue
-        n = len(pnls)
-        if not n:
-            continue
-        total = sum(pnls)
-        wins = sum(1 for p in pnls if p > 0)
-        # trade-level Sharpe: mean/std of per-trade pnl, scaled by √n
-        sharpe = None
-        if n >= 2:
-            mu = total / n
-            var = sum((p - mu) ** 2 for p in pnls) / (n - 1)
-            sd = _math.sqrt(var)
-            if sd > 0:
-                sharpe = round(mu / sd * _math.sqrt(n), 4)
-        # max drawdown of the running cumulative pnl (equity in USDT terms)
-        cum = 0.0; peak = 0.0; maxdd = 0.0
-        for p in pnls:
-            cum += p
-            peak = max(peak, cum)
-            maxdd = min(maxdd, cum - peak)
-        rows.append({
-            'symbol': sym, 'trades': n, 'pnl': round(total, 4),
-            'win_rate': round(100.0 * wins / n, 2),
-            'sharpe': sharpe, 'max_dd': round(maxdd, 4),
-        })
+    for sym in set(by_sym) | set(unreal):
+        stats = _pnl_stats(by_sym[sym]) if sym in by_sym else _pnl_stats([])
+        rows.append(dict(symbol=sym, unrealised=round(float(unreal.get(sym, 0.0)), 4), **stats))
     rows.sort(key=lambda r: r['pnl'], reverse=True)
     return {'job': jid, 'symbols': len(rows), 'rows': rows}
+
+
+@app.get('/api/test/contrib-class/{jid}')
+def per_class_contribution(jid: str):
+    """Same P&L attribution as /api/test/contrib, but pooled by sector/
+    category tag (symbol_classes.SYMBOL_CLASS) — every trade from every
+    symbol in a class gets combined into one trade-level stats line, so
+    win rate / Sharpe / max DD are computed correctly (not just averaged
+    across symbols). `unrealised` sums the class's open-position MTM."""
+    if not _safe_job_id(jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    pdir = os.path.join(JOBS_DIR, jid, 'positions')
+    if not os.path.isdir(pdir):
+        return JSONResponse({'error': 'job has no per-symbol position logs'},
+                            status_code=404)
+    by_sym = _read_position_pnls(pdir)
+    unreal = _read_unrealised(jid)
+    by_class = {}
+    class_syms = {}
+    class_unreal = {}
+    for sym in set(by_sym) | set(unreal):
+        cls = symbol_classes.classify(sym)
+        by_class.setdefault(cls, []).extend(by_sym.get(sym, []))
+        class_syms.setdefault(cls, []).append(sym)
+        class_unreal[cls] = class_unreal.get(cls, 0.0) + float(unreal.get(sym, 0.0))
+    rows = [dict(cls=cls, symbols=sorted(class_syms[cls]),
+                 unrealised=round(class_unreal.get(cls, 0.0), 4), **_pnl_stats(pnls))
+            for cls, pnls in by_class.items()]
+    rows.sort(key=lambda r: r['pnl'], reverse=True)
+    return {'job': jid, 'classes': len(rows), 'rows': rows}
 
 
 @app.get('/api/test/ic/{jid}')
@@ -1516,6 +1678,22 @@ def download_pyfolio():
     zip_base = os.path.join(REPORTS, 'test_data_report')
     shutil.make_archive(zip_base, 'zip', run_backtest.TEST_DATA_DIR)
     return FileResponse(zip_base + '.zip', filename='test_data_report.zip')
+
+
+@app.on_event('startup')
+def _migrate_schema():
+    """Best-effort schema migration at boot (adds e.g. runs.run_tag) so
+    /api/runs doesn't 500 on a pre-migration database before the first
+    backtest gets a chance to run init_schema. DB down is fine — every
+    query path already degrades gracefully."""
+    try:
+        conn = db.get_conn(_retries=1)
+        try:
+            db.init_schema(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        print('[server] schema migration skipped (%s)' % e)
 
 
 if __name__ == '__main__':

@@ -633,7 +633,7 @@ def _write_report_xlsx(out_dir, config_rows, stats, run_tag):
     except Exception as e:
         print('[backtest] per-run xlsx failed: %s' % e)
 
-def _pyfolio_report(strat, out_dir, timeframe='1m'):
+def _pyfolio_report(strat, out_dir, timeframe='1m', want_images=True):
 
     os.makedirs(out_dir, exist_ok=True)
     images, stats, error = [], {}, None
@@ -699,15 +699,16 @@ def _pyfolio_report(strat, out_dir, timeframe='1m'):
         except Exception as e:
             error = 'stats: %s' % e
 
-        try:
-            plt.close('all')
-            fig = pf.create_returns_tear_sheet(returns, return_fig=True)
-            fig.savefig(os.path.join(out_dir, 'returns_tear_sheet.png'),
-                        dpi=90, bbox_inches='tight')
-            images.append('returns_tear_sheet.png')
-            plt.close('all')
-        except Exception as e:
-            error = (error + ' | ' if error else '') + 'returns_tear_sheet: %s' % e
+        if want_images:
+            try:
+                plt.close('all')
+                fig = pf.create_returns_tear_sheet(returns, return_fig=True)
+                fig.savefig(os.path.join(out_dir, 'returns_tear_sheet.png'),
+                            dpi=90, bbox_inches='tight')
+                images.append('returns_tear_sheet.png')
+                plt.close('all')
+            except Exception as e:
+                error = (error + ' | ' if error else '') + 'returns_tear_sheet: %s' % e
     except ImportError:
         error = 'pyfolio not installed (pip install pyfolio-reloaded)'
 
@@ -786,9 +787,31 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
 
         ta = strat.analyzers.trades.get_analysis()
         dd = strat.analyzers.dd.get_analysis()
+        # "Positions" = closed position lifecycles (flat -> open -> flat). A
+        # scale-in ramp with several add-on tranches is still ONE position.
         n_closed = _dget(ta, 'total', 'closed')
         n_won = _dget(ta, 'won', 'total')
         n_lost = _dget(ta, 'lost', 'total')
+        # "Trades" = individual order fills (every entry, add-on, and exit —
+        # what actually executed on the exchange). >= n_closed always; equal
+        # to it only when nothing ever adds to an open position.
+        n_fills = sum(len(v) for v in strat.executed.values())
+
+        # Unrealised (mark-to-market) PnL of positions STILL OPEN at the end
+        # of the backtest — realised pnlcomm in the per-symbol logs only
+        # covers CLOSED positions, so on a run that ends holding open
+        # positions the per-symbol realised sum won't add up to end_value.
+        # unrealised = (last_close - avg_entry_price) * signed_size, gross of
+        # the not-yet-paid exit commission (same basis backtrader uses to
+        # mark open positions into getvalue()).
+        unrealised_by_symbol = {}
+        for d in strat.datas:
+            pos = strat.getposition(d)
+            if pos.size and len(d):
+                last_close = d.close[0]
+                unrealised_by_symbol[d._name] = round(
+                    (last_close - pos.price) * pos.size, 6)
+        unrealised_total = round(sum(unrealised_by_symbol.values()), 4)
 
         pyf = strat.analyzers.getbyname('pyfolio')
         pf_returns, _pf_pos, _pf_txn, _pf_lev = pyf.get_pf_items()
@@ -803,7 +826,10 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
             'end_value': round(end_value, 2),
             'pnl': round(end_value - STARTING_CASH, 2),
             'return_pct': round((end_value / STARTING_CASH - 1) * 100, 4),
-            'trades_closed': n_closed,
+            'trades_closed': n_closed,     # "Positions" in the UI — closed position lifecycles
+            'trades_total': n_fills,       # "Trades" in the UI — individual order fills
+            'unrealised_pnl': unrealised_total,   # MTM of positions open at end
+            'open_positions': len(unrealised_by_symbol),
             'won': n_won,
             'lost': n_lost,
             'win_rate_pct': round(100.0 * n_won / n_closed, 2) if n_closed else None,
@@ -826,8 +852,19 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
             s['won'] += 1 if t['pnlcomm'] > 0 else 0
         for sym in symbols:
             per_symbol.setdefault(sym, {'trades': 0, 'pnl': 0.0, 'won': 0})
-        for s in per_symbol.values():
+        for sym, s in per_symbol.items():
             s['pnl'] = round(s['pnl'], 4)
+            s['unrealised'] = unrealised_by_symbol.get(sym, 0.0)
+
+        # sidecar the raw open-position MTM so the per-symbol/class
+        # contribution endpoints can surface an "Unrealised" column alongside
+        # the realised numbers they read from the position CSVs
+        try:
+            with open(os.path.join(REPORTS, 'unrealised.json'), 'w',
+                      encoding='utf-8') as f:
+                json.dump(unrealised_by_symbol, f)
+        except OSError as e:
+            print('[backtest] unrealised.json write failed: %s' % e)
 
         # ---- chart data (candles + EMAs + fills for interactive charts) -
         _status(state='running', phase='charts', done=0, total=len(symbols))
@@ -843,11 +880,8 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
         run_tag = time.strftime('%Y%m%d-%H%M%S') + '-p%d' % os.getpid()
         effective_name = name or run_tag
         run_dir = os.path.join(TEST_DATA_DIR, run_tag)
-        if want_pyfolio_report:
-            pf_images, pf_stats, pf_error = _pyfolio_report(strat, run_dir, timeframe)
-        else:
-            os.makedirs(run_dir, exist_ok=True)
-            pf_images, pf_stats, pf_error = {}, {}, 'skipped (pyfolio report disabled for this run)'
+        pf_images, pf_stats, pf_error = _pyfolio_report(
+            strat, run_dir, timeframe, want_images=want_pyfolio_report)
         import pandas as pd
         # accumulated log -> archive; per-symbol files -> the job/run folder
         n_pos = _dump_position_logs(strat, run_dir,
