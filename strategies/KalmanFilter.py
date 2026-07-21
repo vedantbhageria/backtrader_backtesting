@@ -35,7 +35,9 @@ class KalmanTest(PortfolioStrategy):
         ('warmup', 30),        # bars used to initialize each filter
         ('q_level', 0.2e-3),     # process noise on level (relative to est. R)
         ('q_vel', 0.2e-6),       # process noise on slope (relative to est. R)
-        ('reversion', False),  # True: fade the deviation; False: follow it
+        ('reversion', True),   # True: fade the deviation (default — matches
+                                # every other strategy's convention); False:
+                                # follow it (breakout)
     )
 
     F = np.array([[1.0, 1.0], [0.0, 1.0]])   # constant-velocity transition
@@ -112,9 +114,14 @@ class KalmanTest(PortfolioStrategy):
             short_sig = innov > band     # price above the upper band"""
         
 
-        long_sig = innov < -band     # price below the lower band
-        short_sig = innov > band     # price above the upper band
-        
+        # innov = price - prediction. FOLLOW (reversion=False): trade in the
+        # direction of the surprise (price broke ABOVE the band -> LONG).
+        # REVERSION (reversion=True, default): fade it (price above the band
+        # -> SHORT, betting it comes back). Same convention as every other
+        # strategy in this project — keep it consistent when editing.
+        long_sig = innov > band      # price above the upper band
+        short_sig = innov < -band    # price below the lower band
+
         if self.params.reversion:
             long_sig, short_sig = short_sig, long_sig
 

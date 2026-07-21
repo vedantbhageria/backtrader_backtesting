@@ -24,6 +24,7 @@ from AccelerationKalmanFilter import AccelerationKalmanTest
 from EMAlgoTest import EMTest
 from EMAlgoNonLinTest import EMNonLinTest
 from EMNonLinScaled import EMNonLinScaled
+from LSTM import LSTMTest
 
 import _paths
 BASE = _paths.ROOT   # datas/ and reports/ live at project root
@@ -74,7 +75,14 @@ STRATEGY_PARAMS = dict(
     trade_usd=2000.0,
     k=2,             # TUNED: wider bands (k=2 over-traded, ~lost; 3 too few trades)
     warmup=180,
-    reversion=False,
+    # reversion=True keeps the ACTUAL behavior this default produced before
+    # 2026-07-20 (when the reversion=False/True meaning in KalmanFilter.py /
+    # ExtendedKalmanFilter.py / AccelerationKalmanFilter.py / EMAlgoTest.py /
+    # LSTM.py was realigned to match EMAlgoNonLinTest.py's convention —
+    # those five files' signal logic used to be the mirror image, so
+    # reversion=False silently meant "fade" there and "follow" everywhere
+    # else. See strategy_base.py / EMAlgoNonLinTest.py comments.
+    reversion=True,
     q_level=0.1e-3,    # INITIAL seed only -- EM re-learns Q,R from data after warmup
     q_vel=0.1e-6,
     em_window=720,     # bars of rolling history each EM refit uses
@@ -88,10 +96,10 @@ STRATEGY_PARAMS = dict(
 STRATEGIES = {
     'EMTest': (EMTest, dict(STRATEGY_PARAMS)),
     'KalmanTest': (KalmanTest, dict(
-        trade_usd=2000.0, k=2.0, warmup=180, reversion=False,
+        trade_usd=2000.0, k=2.0, warmup=180, reversion=True,  # see STRATEGY_PARAMS note
         q_level=0.1e-3, q_vel=0.1e-6)),
     'ExtendedKalmanTest': (ExtendedKalmanTest, dict(
-        trade_usd=2000.0, k=2.0, a=7.0, warmup=180, reversion=False,
+        trade_usd=2000.0, k=2.0, a=7.0, warmup=180, reversion=True,  # see STRATEGY_PARAMS note
         q_level=0.1e-3, q_vel=0.1e-6, q_acc=0.1e-6,
         k_exit=0.0,       # TUNED: dead zone OFF (it cut reversions short, ~7x worse)
         min_hold=1,       # TUNED: no minimum hold; delaying reversals hurt
@@ -100,7 +108,7 @@ STRATEGIES = {
         c_d_window=180,
         trend_bias=False)),  # dropped: trend gate fights a mean-reversion entry
     'AccelerationKalmanTest': (AccelerationKalmanTest, dict(
-        trade_usd=2000.0, k=2.0, warmup=180, reversion=False,
+        trade_usd=2000.0, k=2.0, warmup=180, reversion=True,  # see STRATEGY_PARAMS note
         q_level=0.2e-3, q_vel=0.2e-6, q_acc=0.2e-9)),
     'EMNonLinTest': (EMNonLinTest, dict(
         trade_usd=2000.0, k=2.5, warmup=180,
@@ -143,6 +151,35 @@ STRATEGIES = {
         # used if you clear scale_max_usd back to 0.
         scale_in=True, scale_levels=4, scale_step_pct=0.03,
         scale_size_mult=1.5, scale_max_usd=2000.0)),
+    'LSTM':(LSTMTest,
+        dict(k= 2.5,             # TUNED (exit sweep): band width. 2-2.5 best;
+                                  # reversion=True (fade) profitable at every k,
+                                  # follow/breakout lost money at every k.
+        a= 7.0,             # kept for parity with KalmanTest (unused here)
+        warmup= 60,         # bars collected before the initial fit
+        seq_len= 20,        # lookback window fed to the LSTM each step
+        hidden_size= 16,
+        num_layers= 1,
+        lr= 1e-3,
+        online_steps= 1,    # gradient steps taken per bar on the newest sample
+        vol_window= 50,     # rolling window used to estimate innovation std (S)
+        init_epochs= 150,   # epochs used to pretrain on the warmup window
+        reversion= True,    # see STRATEGY_PARAMS note — True: fade the
+                             # deviation (default); False: follow it (breakout)
+        seed= 42,
+        # position management. TUNED via the exit_band x max_hold sweep on the
+        # full universe, ranked by NET (realized + unrealised) pnl: the old
+        # all-off default only LOOKED good on realized pnl because it never
+        # flattened and bag-held ~-16k unrealised. max_hold cuts losers;
+        # exit_band=0.3 gave the best Sharpe (3.06) / drawdown (6.4%) with far
+        # fewer positions left open at the end.
+        long_only= False,   # no short entries; opposite signal flattens a long
+        max_hold= 120,      # time stop: flatten a position open >= 120 bars (5d on 1h)
+        dead= 0,            # post-warmup settling bars before trading; 0 = off
+        exit_band= 0.3,     # dead-zone exit to cash when |innov| < exit_band*band
+        max_symbols= 0)),   # run-time: cap universe to first N symbols for FAST
+                             # sweeps (0 = all). Not a model param — just speeds
+                             # up iteration; validate the winner on all symbols.
 }
 
 # Every strategy inherits use_trail/trail_pct from PortfolioStrategy.params
@@ -186,6 +223,16 @@ def _resolve_run_config(strategy=None, params=None, days=None):
             # run-time only flag (gates the tear-sheet step in run()); not a
             # strategy kwarg, popped back out before cerebro.addstrategy()
             eff['pyfolio_report'] = v if isinstance(v, bool) else str(v).lower() in ('1', 'true', 'yes', 'on')
+            continue
+        if k == 'max_symbols':
+            # run-time only: cap the universe to the first N symbols
+            # (alphabetical) — for FAST param sweeps / iteration. Not a
+            # strategy kwarg; popped back out before addstrategy(). 0/blank
+            # = all symbols (normal full run).
+            try:
+                eff['max_symbols'] = int(float(v)) if v not in (None, '') else 0
+            except (TypeError, ValueError):
+                eff['max_symbols'] = 0
             continue
         if k not in eff:
             print('[backtest] ignoring unknown param %r for %s' % (k, cls.__name__))
@@ -337,10 +384,13 @@ def _resolve_window(days=None, timeframe='1m'):
     return start, end
 
 
-def _load_feeds(cerebro, fromdate, todate, timeframe='1m'):
+def _load_feeds(cerebro, fromdate, todate, timeframe='1m', max_symbols=0):
     symbols = []
     data_dir, suffix, comp = _tf_cfg(timeframe)
-    for path in sorted(glob.glob(os.path.join(data_dir, '*-%s.csv' % suffix))):
+    paths = sorted(glob.glob(os.path.join(data_dir, '*-%s.csv' % suffix)))
+    if max_symbols and max_symbols > 0:
+        paths = paths[:max_symbols]     # fast-iteration cap (first N alphabetical)
+    for path in paths:
         sym = os.path.basename(path)[:-len('-%s.csv' % suffix)]
         data = bt.feeds.GenericCSVData(
             dataname=path,
@@ -733,6 +783,7 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
     cls, eff_params, days = _resolve_run_config(strategy, params, days)
     # run-time only; not a strategy constructor kwarg
     want_pyfolio_report = eff_params.pop('pyfolio_report', False)
+    max_symbols = eff_params.pop('max_symbols', 0)
     timeframe = timeframe if timeframe in ('1m', '1h') else '1m'
     # Per-bar filter internals ("additional data" CSVs) are recorded when the
     # diag param is on — the dashboard's builder exposes it as a checkbox
@@ -764,12 +815,13 @@ def run(strategy=None, params=None, days=None, timeframe='1m', name=None):
         cerebro.broker.setcash(STARTING_CASH)
         cerebro.broker.setcommission(commission=COMMISSION, leverage=float(LEVERAGE))
 
-        symbols = _load_feeds(cerebro, bt_start, bt_end, timeframe)
+        symbols = _load_feeds(cerebro, bt_start, bt_end, timeframe, max_symbols)
         if not symbols:
             _status(state='error',
                     error='no CSVs in datas/ — run fetch_binance_csv.py first')
             return
-        print('[backtest] %d feeds loaded' % len(symbols))
+        print('[backtest] %d feeds loaded%s' % (len(symbols),
+              ' (capped by max_symbols=%d)' % max_symbols if max_symbols else ''))
 
 #--------------------------------------------------------------------------------------
         cerebro.addstrategy(cls, **eff_params)

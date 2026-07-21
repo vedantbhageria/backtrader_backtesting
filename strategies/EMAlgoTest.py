@@ -203,7 +203,9 @@ class EMTest(PortfolioStrategy):
         ('warmup', 180),        # bars used for the initial polyfit seed
         ('q_level', 0.1e-3),    # INITIAL process noise on level (relative to est. R)
         ('q_vel', 0.1e-6),      # INITIAL process noise on slope (relative to est. R)
-        ('reversion', False),   # True: fade the deviation; False: follow it
+        ('reversion', True),    # True: fade the deviation (default — matches
+                                 # every other strategy's convention); False:
+                                 # follow it (breakout)
         ('em_window', 720),     # bars of rolling history the EM refit uses
         ('em_interval', 1440),   # refit Q,R every this many bars
         ('em_iters', 5),        # EM iterations per refit
@@ -316,8 +318,12 @@ class EMTest(PortfolioStrategy):
         if band <= 0:
             return 0
 
-        long_sig = innov < -band
-        short_sig = innov > band
+        # innov = price - prediction. FOLLOW (reversion=False): trade in the
+        # direction of the surprise (price broke ABOVE the band -> LONG).
+        # REVERSION (reversion=True, default): fade it. Same convention as
+        # every other strategy in this project — keep it consistent.
+        long_sig = innov > band
+        short_sig = innov < -band
 
         if self.params.reversion:
             long_sig, short_sig = short_sig, long_sig

@@ -42,7 +42,9 @@ class ExtendedKalmanTest(PortfolioStrategy):
         ('q_level', 0.2e-3),     # process noise on position (relative to est. R)
         ('q_vel', 0.2e-6),       # process noise on velocity (relative to est. R)
         ('q_acc', 0.2e-9),       # process noise on acceleration (relative to est. R)
-        ('reversion', False),  # True: fade the deviation; False: follow it
+        ('reversion', True),   # True: fade the deviation (default — matches
+                                # every other strategy's convention); False:
+                                # follow it (breakout)
         ('k_exit', 0.5),       # dead zone: exit to FLAT when |innov| < k_exit*sigma
         ('min_hold', 5),       # hold >= this many bars before exit/reverse
         ('cost_mult', 1.0),    # only enter if k*sigma > cost_mult * round-trip cost
@@ -218,8 +220,12 @@ class ExtendedKalmanTest(PortfolioStrategy):
         if band <= self.params.cost_mult * (2.0 * comm * price):
             return 0                          # edge too small to cover costs
 
-        long_sig = innov < -band     # price below the lower band
-        short_sig = innov > band     # price above the upper band
+        # innov = price - prediction. FOLLOW (reversion=False): trade in the
+        # direction of the surprise (price broke ABOVE the band -> LONG).
+        # REVERSION (reversion=True, default): fade it. Same convention as
+        # every other strategy in this project — keep it consistent.
+        long_sig = innov > band      # price above the upper band
+        short_sig = innov < -band    # price below the lower band
 
         if self.params.reversion:
             long_sig, short_sig = short_sig, long_sig

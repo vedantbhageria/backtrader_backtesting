@@ -11,7 +11,7 @@ import threading
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 import _paths                      # noqa: F401  (sys.path: ROOT/backend/strategies)
@@ -26,6 +26,7 @@ import EMAlgoNonLinTest
 import run_backtest
 import symbol_classes
 import pnl_stats
+import LSTM
 
 BASE = _paths.ROOT                 # data/artifacts live at project root
 REPORTS = os.path.join(BASE, 'reports')
@@ -243,7 +244,7 @@ def _reload_modules():
     first would capture a stale class, then reloading the strategy module in
     place rebinds that class's globals — mixing old methods with new functions.
     Returns None on success or an error string."""
-    global db, strategy_base, EMACrossShortTest, KalmanFilter, EMAlgoTest, EMAlgoNonLinTest, run_backtest
+    global db, strategy_base, EMACrossShortTest, KalmanFilter, EMAlgoTest, EMAlgoNonLinTest, run_backtest, LSTM
     global ExtendedKalmanFilter, AccelerationKalmanFilter
     try:
         db = importlib.reload(db)
@@ -254,6 +255,7 @@ def _reload_modules():
         EMAlgoNonLinTest = importlib.reload(EMAlgoNonLinTest)
         ExtendedKalmanFilter = importlib.reload(ExtendedKalmanFilter)
         AccelerationKalmanFilter = importlib.reload(AccelerationKalmanFilter)
+        LSTM = importlib.reload(LSTM)
         run_backtest = importlib.reload(run_backtest)
     except Exception as e:
         return 'reload failed: %s' % e
@@ -810,6 +812,7 @@ MAX_JOBS_PER_SUBMIT = 64
 
 _jobs: dict = {}          # id -> meta dict
 _job_procs: dict = {}     # id -> subprocess.Popen
+_job_logs: dict = {}      # id -> open run.log file handle (closed once the job finishes)
 _jobs_lock = threading.Lock()
 _job_seq = 0
 
@@ -950,11 +953,17 @@ def _spawn_job(meta):
     jid = meta['id']
     jdir = os.path.join(JOBS_DIR, jid)
     env = dict(os.environ, JOB_SKIP_REFRESH='1')
+    # run_backtest already prints the full traceback on failure — capture it
+    # to a per-job log instead of DEVNULL, so a job.error like "'X'" (just
+    # str(exception)) can be followed up with the real stack trace instead of
+    # requiring a source read to guess at the cause.
+    log_f = open(os.path.join(jdir, 'run.log'), 'w', encoding='utf-8')
     proc = subprocess.Popen(
         [sys.executable, os.path.join(_paths.BACKEND, 'job_runner.py'), jdir],
         cwd=_paths.ROOT, env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=log_f, stderr=subprocess.STDOUT)
     _job_procs[jid] = proc
+    _job_logs[jid] = log_f
     meta.update(state='running', phase='starting',
                 started=datetime.now(timezone.utc).isoformat(timespec='seconds'))
 
@@ -1001,6 +1010,10 @@ def _jobs_tick():
                 meta['phase'] = newphase; changed = True
             if proc.poll() is not None:                    # process ended
                 _job_procs.pop(jid, None)
+                log_f = _job_logs.pop(jid, None)
+                if log_f:
+                    try: log_f.close()
+                    except OSError: pass
                 res = _read_json(os.path.join(JOBS_DIR, jid, 'results.json'))
                 if st.get('state') == 'done' and res:
                     # ~60-point equity sparkline for the job card
@@ -1148,6 +1161,10 @@ async def job_action(request: Request):
             proc = _job_procs.pop(jid, None)
             if proc is not None:
                 proc.kill()
+            log_f = _job_logs.pop(jid, None)
+            if log_f:
+                try: log_f.close()
+                except OSError: pass
             if meta['state'] in ('queued', 'running'):
                 meta.update(state='cancelled', phase='cancelled')
         elif action == 'dismiss':
@@ -1269,6 +1286,22 @@ def job_results(jid: str):
     res['chartbase'] = '/reports/jobs/%s/chartdata' % jid
     res['job_id'] = jid
     return res
+
+
+@app.get('/api/jobs/{jid}/log')
+def job_log(jid: str):
+    """Full stdout/stderr of the job subprocess (includes the traceback
+    behind a failed job's short error message). Useful when a job's
+    'error' field is just str(exception) — e.g. a bare KeyError repr like
+    "'X'" — and the actual cause needs the stack trace."""
+    if not all(c.isalnum() or c in '-_' for c in jid):
+        return JSONResponse({'error': 'bad id'}, status_code=400)
+    path = os.path.join(JOBS_DIR, jid, 'run.log')
+    if not os.path.isfile(path):
+        return JSONResponse({'error': 'no log for this job (predates run.log capture, '
+                             'or the job is still running)'}, status_code=404)
+    with open(path, encoding='utf-8', errors='replace') as f:
+        return PlainTextResponse(f.read())
 
 
 def _safe_job_id(jid):
@@ -1641,34 +1674,102 @@ def get_logs(since: int = 0, limit: int = 800):
 
 
 @app.get('/api/data/status')
-def data_status(interval: str = '1m'):
-    """Per-symbol data health for `interval`: first/last stored bar, age of the
-    last bar, and an integrity count (expected bars over the stored span vs
-    actual — crypto trades 24/7 so any shortfall is a real hole)."""
+def data_status(interval: str = '1m', spike_pct: float = 0.5):
+    """Full per-symbol data health for `interval`. Beyond span + gap count
+    (missing bars over each symbol's own 24/7 span), this now also reports
+    VALUE integrity — non-positive/null OHLC, high<low, zero/negative volume,
+    suspicious single-bar jumps over `spike_pct` (fraction, e.g. 0.5 = 50%) —
+    and the stored price range, so a corrupted symbol (the kind that can
+    silently swing a whole backtest) is visible, not just gaps. Also returns
+    portfolio-level totals for the header."""
     interval = interval if interval in ('1m', '1h') else '1m'
     bar_s = 3600 if interval == '1h' else 60
+    try:
+        spike_pct = max(0.01, min(float(spike_pct), 100.0))
+    except (TypeError, ValueError):
+        spike_pct = 0.5
     try:
         import db
         conn = db.get_conn()
     except Exception as e:
         return JSONResponse({'error': 'db unavailable: %s' % e}, status_code=503)
     try:
-        rows = db.per_symbol_span(conn, interval)
+        info = db.data_integrity(conn, interval, spike_pct)
     finally:
         conn.close()
     now = datetime.now(timezone.utc)
     out = []
-    for sym, mn, mx, cnt in rows:
+    for sym in sorted(info):
+        d = info[sym]
+        mn, mx, cnt = d['first'], d['last'], d['bars']
         expected = int((mx - mn).total_seconds() // bar_s) + 1
-        out.append({'symbol': sym,
-                    'first': mn.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
-                    'last': mx.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
-                    'age_min': round((now - mx).total_seconds() / 60.0, 1),
-                    'bars': cnt,
-                    'expected': expected,
-                    'missing': max(0, expected - cnt)})
+        missing = max(0, expected - cnt)
+        # any value-level problem (gaps are tracked separately as `missing`)
+        value_issues = (d['bad_ohlc'] + d['hl_viol'] + d['neg_vol'] + d['spikes'])
+        out.append({
+            'symbol': sym,
+            'first': mn.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+            'last': mx.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+            'age_min': round((now - mx).total_seconds() / 60.0, 1),
+            'bars': cnt,
+            'expected': expected,
+            'missing': missing,
+            'completeness': round(100.0 * cnt / expected, 2) if expected else 100.0,
+            'bad_ohlc': d['bad_ohlc'],
+            'hl_viol': d['hl_viol'],
+            'zero_vol': d['zero_vol'],
+            'neg_vol': d['neg_vol'],
+            'spikes': d['spikes'],
+            'min_close': float(d['min_close']) if d['min_close'] is not None else None,
+            'max_close': float(d['max_close']) if d['max_close'] is not None else None,
+            'value_issues': value_issues,
+            'ok': missing == 0 and value_issues == 0,
+        })
+    totals = {
+        'symbols': len(out),
+        'bars': sum(s['bars'] for s in out),
+        'with_gaps': sum(1 for s in out if s['missing'] > 0),
+        'with_value_issues': sum(1 for s in out if s['value_issues'] > 0),
+        'clean': sum(1 for s in out if s['ok']),
+        'stale': sum(1 for s in out if s['age_min'] and s['age_min'] > 1440),
+        'earliest': min((s['first'] for s in out), default=None),
+        'latest': max((s['last'] for s in out), default=None),
+    }
     return {'interval': interval, 'generated': now.strftime('%Y-%m-%d %H:%M'),
-            'symbols': out}
+            'totals': totals, 'symbols': out}
+
+
+@app.get('/api/data/spikes/{symbol}')
+def data_spikes(symbol: str, interval: str = '1m', spike_pct: float = 0.5):
+    """The actual bars where |close/prev_close - 1| > spike_pct for one symbol
+    — so a flagged symbol can be reviewed bar-by-bar (real move vs bad tick)."""
+    if not symbol or not all(c.isalnum() for c in symbol):
+        return JSONResponse({'error': 'bad symbol'}, status_code=400)
+    interval = interval if interval in ('1m', '1h') else '1m'
+    try:
+        spike_pct = max(0.01, min(float(spike_pct), 100.0))
+    except (TypeError, ValueError):
+        spike_pct = 0.5
+    try:
+        import db
+        conn = db.get_conn()
+    except Exception as e:
+        return JSONResponse({'error': 'db unavailable: %s' % e}, status_code=503)
+    try:
+        rows = db.spike_bars(conn, symbol, interval, spike_pct)
+    finally:
+        conn.close()
+    out = []
+    for ts, prev, close, high, low, vol in rows:
+        prev = float(prev); close = float(close)
+        out.append({
+            'ts': ts.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+            'prev_close': prev, 'close': close,
+            'pct': round((close / prev - 1) * 100, 2),
+            'high': float(high), 'low': float(low), 'volume': float(vol),
+        })
+    return {'symbol': symbol, 'interval': interval,
+            'spike_pct': spike_pct, 'count': len(out), 'bars': out}
 
 
 @app.get('/api/download/pyfolio')

@@ -474,7 +474,14 @@
   #datatbl tbody tr:nth-child(odd) td, #jobtbl tbody tr:nth-child(odd) td { background: rgba(255,255,255,.015); }
   #datatbl th, #jobtbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
     font-weight: 600; border-bottom: 1px solid var(--border); }
-  #datatbl td.bad { color: var(--red); }
+  #datatbl td.bad, #dataevaltbl td.bad { color: var(--red); font-weight: 600; }
+  #dataevaltbl { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  #dataevaltbl th, #dataevaltbl td { padding: 6px 10px; white-space: nowrap; border-bottom: 1px solid var(--border); }
+  #dataevaltbl th { position: sticky; top: 0; background: var(--panel2); color: var(--muted);
+    font-weight: 600; cursor: pointer; z-index: 1; }
+  #dataevaltbl tbody tr:hover td { background: var(--panel2); }
+  #dataevaltbl tr.datarow-bad td:first-child { border-left: 2px solid var(--red); }
+  #dataevaltbl tr.datarow-bad td { background: rgba(248,81,73,.05); }
   /* ---------- history compare bar + context menu ---------- */
   #cmpbar { display: flex; align-items: center; gap: 14px; padding: 9px 16px;
     background: var(--panel2); border-bottom: 1px solid var(--border); }
@@ -1292,11 +1299,22 @@
           <select id="synctf"><option value="1m">1-minute</option><option value="1h">1-hour</option></select>
         </div>
         <button id="syncbtn" class="ghostbtn">Sync data</button>
-        <button id="latestbtn" class="ghostbtn" title="Last stored bar per symbol for the selected timeframe">Latest bars</button>
-        <button id="integbtn" class="ghostbtn" title="Check every symbol for holes in the stored bars">Integrity check</button>
         <button id="reloadbtn" class="ghostbtn" title="Reload strategy code &amp; default params from disk">Reload strategies</button>
-        
-        <div id="datastatus" class="histscroll" style="flex-basis:100%;max-height:420px;display:none"></div>
+      </div>
+    </div>
+
+    <div class="panel" id="dataeval-panel" style="margin-top:16px">
+      <div class="panel-h"><span>Stored data · full integrity &amp; evaluation</span>
+        <span style="display:inline-flex;gap:10px;align-items:center">
+          <input id="datafilter" class="hfilter" placeholder="filter symbol / class…" style="width:160px">
+          <label class="tinynote" title="flag a single-bar close move bigger than this as a suspicious spike">spike &gt;
+            <input id="dataspike" type="number" value="50" min="1" step="5" style="width:52px"> %</label>
+          <label class="tinynote" style="cursor:pointer"><input type="checkbox" id="dataissuesonly"> issues only</label>
+          <a href="#" id="datarefresh" class="note">refresh</a>
+        </span></div>
+      <div class="panel-b">
+        <div id="datacards" class="cards" style="margin-bottom:14px"></div>
+        <div id="dataeval"><p class="note">loading stored-data status…</p></div>
       </div>
     </div>
   </section>
@@ -1501,6 +1519,7 @@ function showStaticTab(name) {
   if (name === 'compare') renderCompare();
   if (name === 'configs') loadSavedConfigs();
   if (name === 'history') loadHistory();
+  if (name === 'data') loadDataStatus();
   if (name === 'console') $('conin').focus();
   restoreScroll();
 }
@@ -2844,75 +2863,151 @@ $('syncbtn').onclick = async () => {
   }
 };
 
-/* ---- data health: latest bar per symbol + integrity check ---- */
+/* ---- data health: full per-symbol integrity + evaluation table ---- */
 const ageFmt = m => m == null ? '—'
   : m < 90 ? Math.round(m) + ' min'
   : m < 48 * 60 ? (m / 60).toFixed(1) + ' h'
   : (m / 1440).toFixed(1) + ' d';
 
-async function fetchDataStatus() {
-  const interval = $('synctf').value;
-  const r = await fetch('/api/data/status?interval=' + encodeURIComponent(interval));
-  const d = await r.json();
-  if (!r.ok || d.error) throw new Error(d.error || r.status);
-  return d;
+let DATA_STATUS = null;             // last /api/data/status payload
+let dataSort = {key: 'symbol', dir: 1};
+// [key, header, numeric, tooltip] — the full column set for the eval table
+const DATA_COLS = [
+  ['symbol', 'Symbol', false, 'trading symbol (sector/category tag shown faded)'],
+  ['first', 'First bar (UTC)', false, 'oldest stored bar — a late first bar = the symbol listed later'],
+  ['last', 'Last bar (UTC)', false, 'newest stored bar'],
+  ['age_min', 'Age', true, 'how stale the newest bar is — large = sync is behind'],
+  ['bars', 'Bars', true, 'total stored bars for this symbol'],
+  ['completeness', 'Complete', true, 'actual / expected bars over the span (24/7). <100% = gaps'],
+  ['missing', 'Missing', true, 'expected − actual bars (holes in the series)'],
+  ['bad_ohlc', 'Bad OHLC', true, 'bars with a non-positive or null open/high/low/close'],
+  ['hl_viol', 'H<L', true, 'bars where high < low (impossible — corrupt)'],
+  ['zero_vol', 'Zero vol', true, 'bars with zero volume (often a stale/synthetic bar)'],
+  ['spikes', 'Spikes', true, 'suspicious >50% single-bar close jumps (bad tick OR a real move)'],
+  ['min_close', 'Min close', true, 'lowest stored close — a 0 or absurd value flags corruption'],
+  ['max_close', 'Max close', true, 'highest stored close'],
+];
+
+function dataSpikeFrac() {
+  const v = Number($('dataspike').value);
+  return (isFinite(v) && v > 0 ? v : 50) / 100;   // percent -> fraction
 }
 
-function showDataStatus(html) {
-  const box = $('datastatus');
-  box.style.display = '';
-  box.innerHTML = html +
-    '<p class="note"><a href="#" onclick="this.closest(\'#datastatus\').style.display=\'none\';return false">close</a></p>';
+async function loadDataStatus() {
+  const box = $('dataeval');
+  box.innerHTML = '<p class="note">scanning stored data…</p>';
+  $('datacards').innerHTML = '';
+  try {
+    const interval = $('synctf').value;
+    const r = await fetch(`/api/data/status?interval=${encodeURIComponent(interval)}&spike_pct=${dataSpikeFrac()}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    DATA_STATUS = d;
+    renderDataStatus();
+  } catch (e) {
+    $('dataeval').innerHTML = `<p class="note neg">data status failed: ${e.message || e}</p>`;
+  }
 }
 
-$('latestbtn').onclick = async () => {
-  $('latestbtn').disabled = true;
+// click-through: list the actual bars where a symbol spiked past the threshold
+async function showSpikeBars(symbol) {
+  const interval = $('synctf').value, box = $('dataeval');
+  box.insertAdjacentHTML('afterbegin', `<div id="spikedetail" class="note">loading spike bars for ${escHtml(symbol)}…</div>`);
   try {
-    const d = await fetchDataStatus();
-    const rows = (d.symbols || []).slice()
-      .sort((a, b) => b.age_min - a.age_min);       // stalest first
-    showDataStatus(
-      `<p class="note">Latest stored <b>${d.interval}</b> bar per symbol
-       (${rows.length} symbols, checked ${d.generated} UTC) — stalest first.</p>
-       <table id="datatbl"><thead><tr><th class="num">#</th><th>Symbol</th>
-       <th>First bar (UTC) <span class="tinynote">(late = listed later)</span></th>
-       <th>Last bar (UTC)</th>
-       <th class="num">Age</th><th class="num">Bars</th></tr></thead><tbody>` +
-      rows.map((s, i) => `<tr><td class="num">${i + 1}</td><td>${s.symbol}</td>
-        <td>${s.first}</td><td>${s.last}</td>
-        <td class="num ${s.age_min > 1440 ? 'bad' : ''}">${ageFmt(s.age_min)}</td>
-        <td class="num">${s.bars.toLocaleString('en-US')}</td></tr>`).join('') +
-      '</tbody></table>');
+    const r = await fetch(`/api/data/spikes/${encodeURIComponent(symbol)}?interval=${encodeURIComponent(interval)}&spike_pct=${dataSpikeFrac()}`);
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.status);
+    const rows = (d.bars || []).map(b => `<tr>
+      <td>${b.ts}</td>
+      <td class="num">${fmt(b.prev_close, 6)}</td>
+      <td class="num">${fmt(b.close, 6)}</td>
+      <td class="num ${b.pct >= 0 ? 'pos' : 'neg'}">${b.pct >= 0 ? '+' : ''}${fmt(b.pct, 1)}%</td>
+      <td class="num">${fmt(b.high, 6)}</td>
+      <td class="num">${fmt(b.low, 6)}</td>
+      <td class="num">${fmt(b.volume, 2)}</td></tr>`).join('');
+    $('spikedetail').innerHTML =
+      `<div class="poshead"><b>${escHtml(symbol)} · ${d.count} spike bar${d.count === 1 ? '' : 's'}</b>
+         <span class="note">${d.interval} · |Δclose| > ${fmt(d.spike_pct * 100, 0)}% vs prior bar · review each: real move or bad tick?
+         <a href="#" onclick="document.getElementById('spikedetail').remove();return false" style="margin-left:8px">close</a></span></div>
+       <div class="posscroll" style="max-height:40vh;margin-bottom:14px"><table id="spikebarstbl">
+         <thead><tr><th>Bar (UTC)</th><th class="num">Prev close</th><th class="num">Close</th>
+         <th class="num">Δ%</th><th class="num">High</th><th class="num">Low</th><th class="num">Volume</th></tr></thead>
+         <tbody>${rows || '<tr><td colspan="7" class="note">none at this threshold</td></tr>'}</tbody></table></div>`;
+    $('spikedetail').scrollIntoView({block: 'start'});
   } catch (e) {
-    showDataStatus(`<p class="note">data status failed: ${e.message || e}</p>`);
+    const el = $('spikedetail');
+    if (el) el.innerHTML = `<p class="note neg">spike detail failed: ${e.message || e}</p>`;
   }
-  $('latestbtn').disabled = false;
-};
+}
 
-$('integbtn').onclick = async () => {
-  $('integbtn').disabled = true;
-  try {
-    const d = await fetchDataStatus();
-    const syms = d.symbols || [];
-    const holed = syms.filter(s => s.missing > 0)
-                      .sort((a, b) => b.missing - a.missing);
-    const head = `<p class="note">Integrity of stored <b>${d.interval}</b> bars
-      (expected = continuous bars over each symbol's own span; crypto trades 24/7):
-      <b class="${holed.length ? 'neg' : 'pos'}">${syms.length - holed.length}/${syms.length}
-      symbols complete</b>${holed.length ? ', ' + holed.length + ' with holes:' : '.'}</p>`;
-    showDataStatus(head + (!holed.length ? '' :
-      `<table id="datatbl"><thead><tr><th>Symbol</th><th>First (UTC)</th><th>Last (UTC)</th>
-       <th class="num">Bars</th><th class="num">Expected</th><th class="num">Missing</th></tr></thead><tbody>` +
-      holed.map(s => `<tr><td>${s.symbol}</td><td>${s.first}</td><td>${s.last}</td>
-        <td class="num">${s.bars.toLocaleString('en-US')}</td>
-        <td class="num">${s.expected.toLocaleString('en-US')}</td>
-        <td class="num bad">${s.missing.toLocaleString('en-US')}</td></tr>`).join('') +
-      '</tbody></table>'));
-  } catch (e) {
-    showDataStatus(`<p class="note">integrity check failed: ${e.message || e}</p>`);
-  }
-  $('integbtn').disabled = false;
-};
+function renderDataStatus() {
+  if (!DATA_STATUS) return;
+  const d = DATA_STATUS, t = d.totals || {};
+  // ---- summary cards ----
+  const card = (k, v, cls) => `<div class="card"><div class="k">${k}</div>
+    <div class="v ${cls || ''}">${v}</div></div>`;
+  $('datacards').innerHTML =
+    card('Symbols', t.symbols ?? '—') +
+    card('Total bars', (t.bars ?? 0).toLocaleString('en-US')) +
+    card('Clean', `${t.clean ?? 0}/${t.symbols ?? 0}`, (t.clean === t.symbols) ? 'pos' : '') +
+    card('With gaps', t.with_gaps ?? 0, t.with_gaps ? 'neg' : 'pos') +
+    card('Value issues', t.with_value_issues ?? 0, t.with_value_issues ? 'neg' : 'pos') +
+    card('Stale (>1d)', t.stale ?? 0, t.stale ? 'neg' : 'pos') +
+    card('Span', `${(t.earliest || '—').slice(0, 10)} → ${(t.latest || '—').slice(0, 10)}`);
+
+  // ---- table ----
+  const q = ($('datafilter').value || '').toUpperCase().trim();
+  const issuesOnly = $('dataissuesonly').checked;
+  let rows = (d.symbols || []).slice();
+  if (issuesOnly) rows = rows.filter(s => !s.ok);
+  if (q) rows = rows.filter(s => (s.symbol + ' ' + (SYMCLASS[s.symbol] || '')).toUpperCase().includes(q));
+  rows.sort((a, b) => cmpVal(a[dataSort.key], b[dataSort.key]) * dataSort.dir);
+
+  const head = DATA_COLS.map(([k, label, num, tip]) =>
+    `<th class="${num ? 'num' : ''}" data-key="${k}" title="${escHtml(tip)}">${label}${
+      dataSort.key === k ? (dataSort.dir < 0 ? ' ▾' : ' ▴') : ''}</th>`).join('');
+  const numCell = (v, bad) => `<td class="num ${bad ? 'bad' : ''}">${
+    v == null ? '—' : (typeof v === 'number' ? v.toLocaleString('en-US', {maximumFractionDigits: 6}) : v)}</td>`;
+  const body = rows.map(s => `<tr class="${s.ok ? '' : 'datarow-bad'}">
+    <td>${escHtml(s.symbol)} ${symClassTag(s.symbol)}</td>
+    <td>${s.first}</td>
+    <td>${s.last}</td>
+    <td class="num ${s.age_min > 1440 ? 'bad' : ''}">${ageFmt(s.age_min)}</td>
+    <td class="num">${s.bars.toLocaleString('en-US')}</td>
+    <td class="num ${s.completeness < 100 ? 'bad' : 'pos'}">${fmt(s.completeness, 2)}%</td>
+    ${numCell(s.missing, s.missing > 0)}
+    ${numCell(s.bad_ohlc, s.bad_ohlc > 0)}
+    ${numCell(s.hl_viol, s.hl_viol > 0)}
+    ${numCell(s.zero_vol, s.zero_vol > 0)}
+    ${s.spikes > 0
+      ? `<td class="num bad"><a href="#" class="spikelink" data-sym="${escHtml(s.symbol)}"
+           title="click to list the spike bars" style="color:inherit;text-decoration:underline">${s.spikes}</a></td>`
+      : numCell(s.spikes, false)}
+    ${numCell(s.min_close, s.min_close != null && s.min_close <= 0)}
+    ${numCell(s.max_close, false)}
+  </tr>`).join('');
+
+  $('dataeval').innerHTML =
+    `<div class="poshead"><b>${rows.length}${issuesOnly ? ' flagged' : ''} of ${(d.symbols || []).length} symbols</b>
+       <span class="note">${d.interval} bars · scanned ${d.generated} UTC · click a header to sort · red = problem</span></div>
+     <div class="posscroll" style="max-height:60vh"><table id="dataevaltbl">
+       <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  const tbl = $('dataeval').querySelector('#dataevaltbl');
+  tbl.querySelector('thead').onclick = e => {
+    const th = e.target.closest('th[data-key]');
+    if (!th) return;
+    const key = th.dataset.key;
+    dataSort = {key, dir: dataSort.key === key ? -dataSort.dir : (key === 'symbol' || key === 'first' || key === 'last' ? 1 : -1)};
+    renderDataStatus();
+  };
+  tbl.querySelectorAll('a.spikelink').forEach(a =>
+    a.onclick = e => { e.preventDefault(); showSpikeBars(a.dataset.sym); });
+}
+$('datarefresh').onclick = e => { e.preventDefault(); loadDataStatus(); };
+$('datafilter').oninput = () => { if (DATA_STATUS) renderDataStatus(); };
+$('dataissuesonly').onchange = () => { if (DATA_STATUS) renderDataStatus(); };
+// changing the threshold needs a re-scan (spike count is computed server-side)
+$('dataspike').onchange = () => { if (DATA_STATUS) loadDataStatus(); };
 
 /* ---- floating server-log window ---- */
 let logLast = 0, logTimer = null;
@@ -3935,7 +4030,9 @@ function renderJobs() {
         </div>
         <div class="jc-artifacts">${artifactBadge('Portfolio', j.has_portfolio_xlsx)}${artifactBadge('Cross-sectional', j.has_crosssectional_xlsx)}</div>`;
     } else if (j.state === 'error') {
-      mid = `<div class="jc-err">${escHtml(j.error || 'failed')}</div>`;
+      mid = `<div class="jc-err">${escHtml(j.error || 'failed')}
+        <a href="/api/jobs/${j.id}/log" target="_blank" onclick="event.stopPropagation()"
+           style="color:inherit;text-decoration:underline;margin-left:6px;white-space:nowrap">view log</a></div>`;
     }
     // corner controls: running/queued get ✕ = cancel; finished get − = hide
     // from the board (folder stays) and ✕ = delete the folder. star + note

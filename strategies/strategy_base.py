@@ -1,6 +1,5 @@
 
-from __future__ import (absolute_import, division, print_function,
-                        unicode_literals)
+from __future__ import (absolute_import, division, print_function,unicode_literals)
 
 from datetime import timezone
 
@@ -68,23 +67,26 @@ class PortfolioStrategy(bt.Strategy):
         self.setup()
 
     def _diag_record(self, d, price, y_pred, innov, S, band, st):
-        """Record one bar of Kalman internals for offline analysis (notebook).
+        """Record one bar of internals for offline analysis (notebook).
         No-op unless the `diag` param is on, so live/dashboard runs are
-        unaffected. Captures the a-posteriori state X and covariance P (upper
-        triangle), the prediction + bands, the innovation and its variance S.
-        Works for any state size (2-state KF, 3-state EKF)."""
+        unaffected. Always captures prediction + bands, innovation and its
+        variance S. Kalman/EM-family strategies additionally carry a state
+        vector X and covariance P (set inside their _step) — captured as
+        x0../P00.. when present. Non-Kalman strategies (e.g. LSTM) have no
+        X/P concept, so those columns are simply omitted rather than raising."""
         if not self.params.diag:
             return
-        X, P = st['X'], st['P']            # a-posteriori (set inside _step)
         rec = {'t': self.bar_epoch(d), 'price': price, 'pred': y_pred,
                'upper': y_pred + band, 'lower': y_pred - band,
                'innov': innov, 'S': S, 'band': band}
-        n = X.shape[0]
-        for i in range(n):
-            rec['x%d' % i] = float(X[i, 0])
-        for i in range(n):
-            for j in range(i, n):          # upper triangle (P is symmetric)
-                rec['P%d%d' % (i, j)] = float(P[i, j])
+        X, P = st.get('X'), st.get('P')    # a-posteriori (set inside _step), if any
+        if X is not None and P is not None:
+            n = X.shape[0]
+            for i in range(n):
+                rec['x%d' % i] = float(X[i, 0])
+            for i in range(n):
+                for j in range(i, n):          # upper triangle (P is symmetric)
+                    rec['P%d%d' % (i, j)] = float(P[i, j])
         self._diag.setdefault(d._name, []).append(rec)
 
     def bar_epoch(self, d):

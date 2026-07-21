@@ -234,6 +234,67 @@ def coverage(conn, symbol, start, end, interval='1m'):
         return cur.fetchone()
 
 
+def data_integrity(conn, interval='1m', spike_pct=0.5):
+    """Full per-symbol data-quality scan for `interval`. Beyond the span/gap
+    counts (per_symbol_span only covers those), this also catches BAD VALUES
+    that a gap check can't see — non-positive/null OHLC, high<low, zero/negative
+    volume, and suspicious >spike_pct single-bar close jumps — plus the stored
+    price range. Returns {symbol: {span/value metrics}}. One pass of a few
+    grouped queries (window function for the spike detect)."""
+    tbl = _bars_table(interval)
+    out = {}
+    with conn.cursor() as cur:
+        # span + total bars
+        cur.execute("SELECT symbol, min(ts), max(ts), count(*) FROM %s "
+                    "GROUP BY symbol" % tbl)
+        for sym, mn, mx, cnt in cur.fetchall():
+            out[sym] = {'first': mn, 'last': mx, 'bars': cnt,
+                        'bad_ohlc': 0, 'hl_viol': 0, 'zero_vol': 0,
+                        'neg_vol': 0, 'spikes': 0,
+                        'min_close': None, 'max_close': None}
+        # value integrity + price range (aggregate, cheap)
+        cur.execute("""SELECT symbol,
+              count(*) FILTER (WHERE open<=0 OR high<=0 OR low<=0 OR close<=0
+                    OR open IS NULL OR high IS NULL OR low IS NULL OR close IS NULL),
+              count(*) FILTER (WHERE high < low),
+              count(*) FILTER (WHERE volume = 0),
+              count(*) FILTER (WHERE volume < 0),
+              min(close), max(close)
+            FROM %s GROUP BY symbol""" % tbl)
+        for sym, bad, hl, zv, nv, mnc, mxc in cur.fetchall():
+            if sym in out:
+                out[sym].update(bad_ohlc=bad, hl_viol=hl, zero_vol=zv,
+                                neg_vol=nv, min_close=mnc, max_close=mxc)
+        # suspicious single-bar jumps (window function)
+        cur.execute("""WITH j AS (
+              SELECT symbol, close,
+                     lag(close) OVER (PARTITION BY symbol ORDER BY ts) AS prev
+              FROM %s)
+            SELECT symbol, count(*) FILTER (
+                WHERE prev IS NOT NULL AND prev > 0 AND abs(close/prev - 1) > %%s)
+            FROM j GROUP BY symbol""" % tbl, (spike_pct,))
+        for sym, sp in cur.fetchall():
+            if sym in out:
+                out[sym]['spikes'] = sp
+    return out
+
+
+def spike_bars(conn, symbol, interval='1m', spike_pct=0.5, limit=500):
+    """The actual bars where |close/prev_close - 1| > spike_pct for one symbol
+    — so a flagged symbol can be inspected bar-by-bar (real move vs bad tick).
+    Returns [{ts, prev_close, close, pct, high, low, volume}] oldest-first."""
+    tbl = _bars_table(interval)
+    with conn.cursor() as cur:
+        cur.execute("""WITH j AS (
+              SELECT ts, high, low, close, volume,
+                     lag(close) OVER (ORDER BY ts) AS prev
+              FROM %s WHERE symbol = %%s)
+            SELECT ts, prev, close, high, low, volume FROM j
+            WHERE prev IS NOT NULL AND prev > 0 AND abs(close/prev - 1) > %%s
+            ORDER BY ts LIMIT %%s""" % tbl, (symbol, spike_pct, limit))
+        return cur.fetchall()
+
+
 def insert_bars(conn, symbol, rows, interval='1m'):
 
     if not rows:

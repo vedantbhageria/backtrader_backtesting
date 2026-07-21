@@ -1,4 +1,3 @@
-
 import glob
 import html
 import json
@@ -43,7 +42,6 @@ def pick_symbol(prefer, data_dir=DATA_DIR, suffix='1m'):
 
 
 def _window_start(mn, mx, days):
-    """Start of the export window: last `days` before mx (None -> everything)."""
     if not days:
         return mn
     from datetime import timedelta
@@ -51,10 +49,6 @@ def _window_start(mn, mx, days):
 
 
 def _ensure_symbol_csv(prefer, timeframe, days=None):
-    """Export the chosen symbol's history for `timeframe` from postgres so the
-    report reflects the database rather than whatever short window a prior run
-    happened to leave in datas/. (None = everything).
-    fallback: existing csvs."""
     import run_backtest
     data_dir, suffix, _ = run_backtest._tf_cfg(timeframe)
     os.makedirs(data_dir, exist_ok=True)
@@ -83,7 +77,6 @@ def _ensure_symbol_csv(prefer, timeframe, days=None):
 
 
 def _ensure_all_csvs(timeframe, days=None):
-    """same as above but for all symbols together"""
     import run_backtest
     data_dir, suffix, _ = run_backtest._tf_cfg(timeframe)
     os.makedirs(data_dir, exist_ok=True)
@@ -114,7 +107,6 @@ def _ensure_all_csvs(timeframe, days=None):
 
 
 def run_strategy(label, Strat, params, feeds, color, compression=1):
-
     cer = bt.Cerebro()
     cer.broker.setcash(START_CASH)
     cer.broker.setcommission(commission=COMMISSION, leverage=LEVERAGE)
@@ -128,8 +120,8 @@ def run_strategy(label, Strat, params, feeds, color, compression=1):
     strat = cer.run()[0]
     end = cer.broker.getvalue()
     rows = strat._diag.get(feeds[0][0], []) if len(feeds) == 1 else []
-    if rows:                       # strategies without filter internals (e.g.
-        diag = pd.DataFrame(rows)  # EMACross) still get equity/PnL panels
+    if rows:
+        diag = pd.DataFrame(rows)
         diag['dt'] = pd.to_datetime(diag['t'], unit='s', utc=True)
         diag = diag.set_index('dt')
     else:
@@ -142,9 +134,6 @@ def run_strategy(label, Strat, params, feeds, color, compression=1):
     if diag is not None:
         innov = diag['innov'].to_numpy(float)
         rms = round(float(np.sqrt(np.mean(innov ** 2))), 4)
-    # 'trades' = closed position lifecycles ("Positions" in the dashboard);
-    # 'trades_total' = individual order fills (entries + scale-in adds +
-    # exits) — the two only diverge when a strategy adds to an open position.
     stats = dict(end_value=round(end, 2), pnl=round(end - START_CASH, 2),
                  trades=len(tl), trades_total=sum(len(v) for v in strat.executed.values()),
                  wins=wins,
@@ -160,12 +149,12 @@ def ds(index, y):
 
 
 LAYOUT = dict(template='plotly_dark', hovermode='x',
-              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(22,29,43,0.6)',
+              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(17,24,39,0.4)',
               margin=dict(l=60, r=20, t=40, b=40),
               legend=dict(orientation='h', y=1.06, x=0),
               font=dict(family='system-ui, sans-serif', size=12),
-              hoverlabel=dict(bgcolor='#1b2536', bordercolor='#37c1d1',
-                              font=dict(color='#e7edf5', size=12)))
+              hoverlabel=dict(bgcolor='#1F2937', bordercolor='#38BDF8',
+                              font=dict(color='#F3F4F6', size=12)))
 
 
 def fig_pred(results):
@@ -244,29 +233,46 @@ def fig_equity(results):
                                  name='%s · PnL %+.0f' % (res['name'], res['stats']['pnl']),
                                  hovertemplate='%{y:.0f}<extra></extra>'))
     fig.add_hline(y=START_CASH, line=dict(color='gray', dash='dash', width=0.6))
-    fig.update_layout(height=400, **LAYOUT)
-    fig.update_yaxes(title_text='account value ($)')
+    fig.update_layout(height=450, **LAYOUT)
+    fig.update_yaxes(title_text='Account Value ($)')
     return fig
 
 
 def fig_winpnl(results):
-    fig = make_subplots(rows=1, cols=2, subplot_titles=['Win rate (%)', 'PnL ($)'])
+    fig = make_subplots(rows=3, cols=1, vertical_spacing=0.12, 
+                        subplot_titles=['PnL ($)', 'Win Rate (%)', 'Max Drawdown (%)'])
     names = [r['name'] for r in results]
     bar_c = [r['color'] for r in results]
-    fig.add_trace(go.Bar(x=names, y=[r['stats']['win_rate'] for r in results],
-                         marker_color=bar_c, showlegend=False,
-                         hovertemplate='%{y:.2f}%<extra></extra>'), row=1, col=1)
+    
     fig.add_trace(go.Bar(x=names, y=[r['stats']['pnl'] for r in results],
                          marker_color=bar_c, showlegend=False,
-                         hovertemplate='$%{y:.2f}<extra></extra>'), row=1, col=2)
-    fig.update_layout(height=360, template='plotly_dark',
-                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(22,29,43,0.6)',
+                         hovertemplate='$%{y:.2f}<extra></extra>'), row=1, col=1)
+    
+    fig.add_trace(go.Bar(x=names, y=[r['stats']['win_rate'] for r in results],
+                         marker_color=bar_c, showlegend=False,
+                         hovertemplate='%{y:.2f}%<extra></extra>'), row=2, col=1)
+                         
+    dds = []
+    for r in results:
+        if r.get('summary') and r['summary'].get('max_drawdown_pct') is not None:
+            dds.append(-abs(r['summary']['max_drawdown_pct']))
+        else:
+            eq = r['equity']['value']
+            cm = eq.cummax()
+            dd = (eq - cm) / cm * 100
+            dds.append(-abs(dd.min()) if not dd.empty else 0.0)
+            
+    fig.add_trace(go.Bar(x=names, y=dds,
+                         marker_color=bar_c, showlegend=False,
+                         hovertemplate='%{y:.2f}%<extra></extra>'), row=3, col=1)
+                         
+    fig.update_layout(height=720, template='plotly_dark',
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(17,24,39,0.4)',
                       margin=dict(l=50, r=20, t=40, b=30))
     return fig
 
 
 _SUMMARY_LABELS = {'trades': 'positions', 'trades_total': 'trades'}
-
 
 def summary_table(results):
     cols = ['end_value', 'pnl', 'trades', 'trades_total', 'wins', 'win_rate']
@@ -277,18 +283,34 @@ def summary_table(results):
         cells = ''
         for c in cols:
             v = s[c]
-            # only pnl has a meaningful sign — leave counts/rates neutral
             cls = ' pos' if c == 'pnl' and isinstance(v, (int, float)) and v > 0 \
                 else ' neg' if c == 'pnl' and isinstance(v, (int, float)) and v < 0 else ''
             cells += '<td class="%s">%s</td>' % (cls.strip(), '&mdash;' if v is None else v)
         body += '<tr><th class="rowh">%s</th>%s</tr>' % (res['name'], cells)
-    return '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>' % (head, body)
+        
+    if len(results) == 2:
+        s0, s1 = results[0]['stats'], results[1]['stats']
+        cells = ''
+        for c in cols:
+            v0, v1 = s0[c], s1[c]
+            if isinstance(v0, (int, float)) and isinstance(v1, (int, float)):
+                delta = v0 - v1
+                if c in ['end_value', 'pnl']:
+                    delta = round(delta, 2)
+                cls = 'pos' if delta > 0 else 'neg' if delta < 0 else ''
+                fmt = '%+.2f' if c == 'win_rate' else '%+g'
+                cells += '<td class="delta %s">%s</td>' % (cls, fmt % delta)
+            else:
+                cells += '<td class="delta">&mdash;</td>'
+        body += '<tr class="delta-row"><th class="rowh">Δ (%s &minus; %s)</th>%s</tr>' % (results[0]['name'], results[1]['name'], cells)
+
+    return '<div class="table-container"><table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table></div>' % (head, body)
 
 _PSTAT_ROWS = [
     ('End value (USDT)',        'end_value',                    lambda v: '%.2f' % v),
     ('PnL (USDT)',              'pnl',                          lambda v: '%+.2f' % v),
     ('Return %',                'return_pct',                   lambda v: '%+.3f%%' % v),
-    ('Positions',                'trades_closed',                lambda v: '%d' % v),
+    ('Positions',               'trades_closed',                lambda v: '%d' % v),
     ('Trades',                  'trades_total',                 lambda v: '%d' % v),
     ('Win rate %',              'win_rate_pct',                 lambda v: '%.1f%%' % v),
     ('Max drawdown %',          'max_drawdown_pct',             lambda v: '%.2f%%' % v),
@@ -299,37 +321,51 @@ _PSTAT_ROWS = [
     ('Sharpe (log)',            'sharpe_log_returns',           lambda v: '%.4f' % v),
 ]
 
-
 def stats_table(results):
-    """Portfolio-stats comparison (metrics as rows, runs as columns) for
-    results that carry a full run summary (archived-run compares)."""
     runs = [r for r in results if r.get('summary')]
     if not runs:
         return ''
+        
+    is_pair = len(runs) == 2
     head = ''.join('<th>%s</th>' % r['name'] for r in runs)
+    
+    if is_pair:
+        head += '<th>Δ (%s &minus; %s)</th>' % (runs[0]['name'], runs[1]['name'])
+
     body = ''
     for label, key, fmt in _PSTAT_ROWS:
         cells = ''
+        vals = []
         for r in runs:
             v = r['summary'].get(key)
+            vals.append(v)
             missing = v is None or v != v
             cls = '' if missing or not isinstance(v, (int, float)) else (' pos' if v > 0 else ' neg' if v < 0 else '')
             try:
                 cells += '<td class="%s">%s</td>' % (cls.strip(), '&mdash;' if missing else fmt(v))
             except (TypeError, ValueError):
                 cells += '<td>%s</td>' % v
+                
+        if is_pair:
+            v0, v1 = vals[0], vals[1]
+            if isinstance(v0, (int, float)) and isinstance(v1, (int, float)) and v0 == v0 and v1 == v1:
+                delta = v0 - v1
+                cls = 'pos' if delta > 0 else 'neg' if delta < 0 else ''
+                try:
+                    cells += '<td class="delta %s">%s</td>' % (cls, fmt(delta))
+                except:
+                    cells += '<td class="delta">&mdash;</td>'
+            else:
+                cells += '<td class="delta">&mdash;</td>'
+
         body += '<tr><th class="rowh">%s</th>%s</tr>' % (label, cells)
-    return ('<h2 id="portfolio-stats">Portfolio stats</h2>'
+        
+    return ('<div class="table-container">'
             '<table class="statstable"><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>'
-            % (head, body))
+            '</div>' % (head, body))
 
 
 def _sym_compare_html(runs):
-    """Interactive per-symbol compare for runs that carry job chartdata: a
-    symbol dropdown drives a per-run stats table (PnL/positions/win rate/
-    Sharpe/max DD from the position logs) plus one subplot row per run
-    (price + every stored indicator/prediction line, disclaimer:
-    downsampled)."""
     runs = [r for r in runs if r.get('symdata')]
     if not runs:
         return ''
@@ -337,37 +373,53 @@ def _sym_compare_html(runs):
                               *[set(r.get('symstats') or {}) for r in runs]))
     if not syms:
         return ''
-    # is there ANY additional (diag) series to toggle? if not, say so instead
-    # of showing a checkbox that silently does nothing
-    has_addl = any(L.get('additional')
-                   for r in runs for e in r['symdata'].values()
-                   for L in e.get('lines', []))
-    addl_ctl = ("""
-  <label style="margin-left:14px;font-size:13px;color:#8a97ad;cursor:pointer">
-    <input type="checkbox" id="symaddl"> show additional (diag) data
-  </label>""" if has_addl else """
-  <label style="margin-left:14px;font-size:13px;color:#5a657a" title="none of the compared runs recorded per-bar filter internals — run with 'Record additional data' checked to get them">
-    <input type="checkbox" id="symaddl" disabled> show additional (diag) data (none recorded)
-  </label>""")
+  
+    sync_ctl = """
+  <label style="font-size:13px;color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-weight:600;">
+    <input type="checkbox" id="symsync" checked> Sync Chart Pan & Zoom
+  </label>
+    """
+  
     payload = json.dumps({r['name']: r['symdata'] for r in runs})
     statspayload = json.dumps({r['name']: (r.get('symstats') or {}) for r in runs})
     meta = json.dumps([{'name': r['name'], 'color': r['color']} for r in runs])
-    options = ''.join('<option>%s</option>' % s for s in syms)
+    options = ''.join('<option>%s</option>' % html.escape(s) for s in syms)
+    
     run_checks = ''.join(
-        '<label style="margin-right:12px;font-size:12px;color:%s;cursor:pointer">'
+        '<label style="margin-right:20px;font-size:13px;color:%s;cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:6px;">'
         '<input type="checkbox" class="symruncb" data-run="%s" checked> %s</label>'
         % (r['color'], html.escape(r['name'], quote=True), html.escape(r['name']))
         for r in runs)
+        
     return """
-<h2>Per-symbol compare</h2>
-<p class="note">Stats from the full position logs · one chart panel per run · drag to zoom.</p>
-<p>
-  <select id="symsel" style="background:#1b2536;color:#e7edf5;border:1px solid #243048;
-   border-radius:6px;padding:6px 10px;font-size:14px">%s</select>%s
-</p>
-<p id="symrunpicker">%s</p>
+<p class="note" style="margin-top:0;">Stats from the full position logs · one chart panel per run · drag to zoom.</p>
+<div style="display: flex; flex-wrap: wrap; align-items: center; margin-bottom: 24px; padding: 16px 20px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--line);">
+  
+  <div style="display: flex; align-items: center; width: 100%%; gap: 32px; flex-wrap: wrap;">
+      <select id="symsel" style="background:#111827;color:#F3F4F6;border:1px solid #374151;border-radius:6px;padding:8px 12px;font-size:14px;outline:none;cursor:pointer">%s</select>
+      <div style="display: flex; align-items: center; gap: 24px;">
+          %s
+      </div>
+  </div>
+  
+  <div id="symrunpicker" style="flex-basis: 100%%; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line);">
+      <div style="margin-bottom: 12px; font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.1em;">Compare Strategies</div>
+      %s
+  </div>
+  
+  <div id="addl_picker_container" style="flex-basis: 100%%; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); display: none;">
+      <div style="margin-bottom: 12px; font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.1em;">Additional Data Subplots</div>
+      <div id="addl_picker" style="display:flex; flex-wrap: wrap; gap: 10px;"></div>
+  </div>
+  
+</div>
 <div id="symstatstbl"></div>
-<div id="symcmp"></div>
+
+<div id="symcmp-wrapper" style="position: relative; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: var(--panel);">
+    <button id="symcmp-expand" style="position: absolute; top: 12px; right: 12px; z-index: 100; background: var(--panel); border: 1px solid var(--line); color: var(--ink); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: all 0.2s;" title="Toggle Fullscreen">&#9974;</button>
+    <div id="symcmp"></div>
+</div>
+
 <script>
 const SYMDATA = %s;
 const SYMSTATS = %s;
@@ -375,80 +427,247 @@ const SYMRUNS = %s;
 const SYMMETRICS = [['Realised','pnl',2],['Unrealised','unrealised',2],['Total','total',2],
                     ['Positions','trades',0],['Win %%','win_rate',1],
                     ['Sharpe','sharpe',3],['Max DD','max_dd',2]];
+
+let addlState = {};
+
+function renderAddlCheckboxes(sym) {
+    const shownRuns = new Set([...document.querySelectorAll('.symruncb:checked')].map(el => el.dataset.run));
+    const addlNames = new Set();
+    
+    SYMRUNS.filter(r => shownRuns.has(r.name)).forEach(r => {
+        const d = (SYMDATA[r.name] || {})[sym];
+        if (d && d.lines) {
+            d.lines.forEach(L => { if (L.additional) addlNames.add(L.name); });
+        }
+    });
+    
+    const containerBlock = document.getElementById('addl_picker_container');
+    const pickerDiv = document.getElementById('addl_picker');
+    
+    if (addlNames.size === 0) {
+        containerBlock.style.display = 'none';
+        return;
+    }
+    
+    containerBlock.style.display = 'block';
+    let html = '';
+    
+    [...addlNames].sort().forEach(name => {
+        if (addlState[name] === undefined) addlState[name] = false;
+        const checked = addlState[name] ? 'checked' : '';
+        html += `<label style="font-size:12px;color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:6px; background: rgba(255,255,255,0.05); padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); transition: border-color 0.2s;">
+            <input type="checkbox" class="addlcb" value="${name}" ${checked}> ${name}
+        </label>`;
+    });
+    
+    pickerDiv.innerHTML = html;
+    
+    document.querySelectorAll('.addlcb').forEach(cb => {
+        cb.onchange = e => {
+            addlState[e.target.value] = e.target.checked;
+            drawSym(document.getElementById('symsel').value);
+        };
+    });
+}
+
 function symStatsTable(sym) {
   const shown = new Set([...document.querySelectorAll('.symruncb:checked')].map(el => el.dataset.run));
   const runs = SYMRUNS.filter(r => shown.has(r.name));
   const rows = runs.map(r => (SYMSTATS[r.name] || {})[sym] || null);
   if (!rows.some(Boolean)) { document.getElementById('symstatstbl').innerHTML = ''; return; }
   const fmtc = (v, dp) => v == null ? '\\u2014' : Number(v).toFixed(dp);
-  const head = '<tr><th></th>' + runs.map(r => '<th>' + r.name + '</th>').join('') + '</tr>';
+  
+  let head = '<tr><th></th>' + runs.map(r => '<th>' + r.name + '</th>').join('');
+  const isPair = runs.length === 2;
+  if (isPair) head += '<th>Δ (' + runs[0].name + ' &minus; ' + runs[1].name + ')</th>';
+  head += '</tr>';
+  
   const body = SYMMETRICS.map(([label, key, dp]) => {
     const vals = rows.map(r => r ? r[key] : null);
     const nums = vals.filter(v => typeof v === 'number');
     let bestV = null, worstV = null;
     if (nums.length > 1 && new Set(nums).size > 1) { bestV = Math.max(...nums); worstV = Math.min(...nums); }
-    const cells = vals.map(v => {
+    let cells = vals.map(v => {
       const cls = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
       return '<td class="' + cls + '">' + fmtc(v, dp) + '</td>';
     }).join('');
+    
+    if (isPair) {
+        const v0 = vals[0], v1 = vals[1];
+        if (typeof v0 === 'number' && typeof v1 === 'number') {
+            const delta = v0 - v1;
+            const cls = delta > 0 ? 'pos' : delta < 0 ? 'neg' : '';
+            const sign = delta > 0 ? '+' : '';
+            cells += '<td class="delta ' + cls + '">' + sign + fmtc(delta, dp) + '</td>';
+        } else {
+            cells += '<td class="delta">&mdash;</td>';
+        }
+    }
     return '<tr><th class="rowh">' + label + '</th>' + cells + '</tr>';
   }).join('');
   document.getElementById('symstatstbl').innerHTML =
-    '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+    '<div class="table-container" style="margin-bottom: 24px;"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>';
 }
+
 function drawSym(sym) {
   symStatsTable(sym);
-  const showAddl = document.getElementById('symaddl').checked;
+  const doSync = document.getElementById('symsync').checked;
   const shown = new Set([...document.querySelectorAll('.symruncb:checked')].map(el => el.dataset.run));
-  const traces = [], names = [];
+  const traces = [], ann = [];
+  const layoutAxes = {};
+  
+  const runsToDraw = [];
   SYMRUNS.filter(run => shown.has(run.name)).forEach(run => {
-    const d = (SYMDATA[run.name] || {})[sym];
-    if (!d) return;
-    names.push(run.name);
-    const i = names.length;
-    const xa = i === 1 ? 'x' : 'x' + i, ya = i === 1 ? 'y' : 'y' + i;
-    const T = a => a.map(t => new Date(t * 1000));
-    traces.push({x: T(d.price.t), y: d.price.v, name: 'price', xaxis: xa, yaxis: ya,
-                 line: {color: '#8a97ad', width: 1}, showlegend: i === 1});
-    d.lines.forEach(L => {
-      if (L.additional && !showAddl) return;
-      traces.push({x: T(L.t), y: L.v, name: L.additional ? L.name + ' (additional)' : L.name,
-                   xaxis: xa, yaxis: ya, showlegend: i === 1,
-                   line: {color: L.color, width: 1, dash: L.additional ? 'dot' : 'solid'}});
-    });
+      const d = (SYMDATA[run.name] || {})[sym];
+      if (d) {
+          const addlLines = d.lines.filter(L => L.additional && addlState[L.name]);
+          runsToDraw.push({ run: run, d: d, addlLines: addlLines });
+      }
   });
-  const n = Math.max(names.length, 1);
-  const ann = names.map((t, i) => ({text: t, showarrow: false, xref: 'paper',
-    x: 0, xanchor: 'left', yref: 'paper', y: 1 - i / n, yanchor: 'bottom',
-    font: {size: 12, color: '#8a97ad'}}));
-  Plotly.react('symcmp', traces, {
-    grid: {rows: n, columns: 1, pattern: 'independent'},
-    height: Math.max(300, 270 * n), annotations: ann,
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(22,29,43,0.6)',
-    font: {color: '#e7edf5', size: 12}, hovermode: 'x',
-    margin: {l: 60, r: 20, t: 30, b: 30},
-    legend: {orientation: 'h', y: 1.05},
-  }, {responsive: true, scrollZoom: true});
+
+  if (runsToDraw.length === 0) {
+      document.getElementById('symcmp').innerHTML = '<div style="padding: 48px 0; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 8px; font-weight: 500;">No chart data recorded for this symbol (0 positions).</div>';
+      return;
+  }
+  
+  let rowCount = 0;
+  let totalUnits = 0;
+  const runSpacing = 0.4; 
+  
+  runsToDraw.forEach(item => {
+      item.priceRow = ++rowCount;
+      item.addlRows = item.addlLines.map(() => ++rowCount);
+      item.units = 2.0 + item.addlLines.length * 0.8;
+      totalUnits += item.units + runSpacing;
+  });
+  totalUnits -= runSpacing; 
+  
+  let currentUnit = totalUnits;
+  const masterX = 'x'; 
+  
+  runsToDraw.forEach((item, index) => {
+      const runName = item.run.name;
+      const T = a => a.map(t => new Date(t * 1000));
+      
+      const priceTop = currentUnit / totalUnits;
+      const priceBottom = (currentUnit - 2.0) / totalUnits;
+      currentUnit -= 2.0;
+      
+      const isFirst = item.priceRow === 1;
+      const xaPrice = isFirst ? 'x' : 'x' + item.priceRow;
+      const yaPrice = isFirst ? 'y' : 'y' + item.priceRow;
+      
+      layoutAxes['yaxis' + (isFirst ? '' : item.priceRow)] = { 
+          domain: [priceBottom, priceTop], 
+          title: {text: 'Price', font: {size: 11, color: '#9CA3AF'}},
+          fixedrange: false
+      };
+      
+      const targetMatch = (doSync && !isFirst) ? masterX : undefined;
+      layoutAxes['xaxis' + (isFirst ? '' : item.priceRow)] = {
+          matches: targetMatch,
+          showticklabels: item.addlLines.length === 0
+      };
+      
+      traces.push({
+          x: T(item.d.price.t), y: item.d.price.v, name: runName + ' Price', 
+          xaxis: xaPrice, yaxis: yaPrice, line: {color: '#8a97ad', width: 1.5}, showlegend: false,
+          hovertemplate: '%%{y:.5g}<extra></extra>'
+      });
+      
+      item.d.lines.forEach(L => {
+          if (!L.additional) {
+              traces.push({
+                  x: T(L.t), y: L.v, name: L.name, xaxis: xaPrice, yaxis: yaPrice,
+                  showlegend: true, line: {color: L.color, width: 1, dash: 'solid'},
+                  hovertemplate: '%%{y:.5g}<extra></extra>'
+              });
+          }
+      });
+      
+      ann.push({
+          text: '<b>' + runName + '</b>', showarrow: false, xref: 'paper', x: 0, xanchor: 'left',
+          yref: 'paper', y: priceTop, yanchor: 'bottom', yshift: 10,
+          font: {size: 14, color: item.run.color}
+      });
+      
+      item.addlLines.forEach((L, idx) => {
+          const addlRow = item.addlRows[idx];
+          const xaAddl = 'x' + addlRow;
+          const yaAddl = 'y' + addlRow;
+          
+          const addlTop = currentUnit / totalUnits;
+          const addlBottom = (currentUnit - 0.8) / totalUnits;
+          currentUnit -= 0.8;
+          
+          layoutAxes['yaxis' + addlRow] = { 
+              domain: [addlBottom, addlTop],
+              title: {text: L.name, font: {size: 10, color: '#9CA3AF'}}
+          };
+          
+          layoutAxes['xaxis' + addlRow] = { 
+              matches: (doSync ? masterX : xaPrice),
+              showticklabels: idx === item.addlLines.length - 1
+          };
+          
+          traces.push({
+              x: T(L.t), y: L.v, name: runName + ' ' + L.name, xaxis: xaAddl, yaxis: yaAddl,
+              showlegend: false, line: {color: L.color, width: 1.2, dash: 'solid'},
+              hovertemplate: '%%{y:.5g}<extra></extra>'
+          });
+      });
+      
+      currentUnit -= runSpacing; 
+  });
+  
+  const baseHeight = Math.max(350, 100 * totalUnits);
+  
+  const wrapper = document.getElementById('symcmp-wrapper');
+  const isFull = wrapper.classList.contains('fullscreen-chart');
+  
+  const layout = {
+      height: isFull ? window.innerHeight - 80 : baseHeight,
+      annotations: ann,
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(17,24,39,0.4)',
+      font: {color: '#F3F4F6', size: 12}, hovermode: 'x unified',
+      margin: {l: 60, r: 20, t: 40, b: 30},
+      legend: {orientation: 'h', y: 1.02, yanchor: 'bottom'},
+      dragmode: 'zoom'
+  };
+  Object.assign(layout, layoutAxes);
+  
+  Plotly.react('symcmp', traces, layout, {responsive: true, scrollZoom: true});
+  
+  const expandBtn = document.getElementById('symcmp-expand');
+  expandBtn.replaceWith(expandBtn.cloneNode(true)); 
+  const newExpandBtn = document.getElementById('symcmp-expand');
+  
+  newExpandBtn.onclick = function() {
+      const isFull = wrapper.classList.toggle('fullscreen-chart');
+      this.innerHTML = isFull ? '&#10006;' : '&#9974;';
+      const newHeight = isFull ? window.innerHeight - 80 : baseHeight;
+      Plotly.relayout('symcmp', { height: newHeight });
+  };
 }
-document.getElementById('symsel').onchange = e => drawSym(e.target.value);
-document.getElementById('symaddl').onchange = () => drawSym(document.getElementById('symsel').value);
+
+document.getElementById('symsel').onchange = () => {
+    renderAddlCheckboxes(document.getElementById('symsel').value);
+    drawSym(document.getElementById('symsel').value);
+};
+document.getElementById('symsync').onchange = () => drawSym(document.getElementById('symsel').value);
 document.querySelectorAll('.symruncb').forEach(cb =>
-  cb.onchange = () => drawSym(document.getElementById('symsel').value));
+  cb.onchange = () => {
+      renderAddlCheckboxes(document.getElementById('symsel').value);
+      drawSym(document.getElementById('symsel').value);
+  });
+
+// Initialize on Load
+renderAddlCheckboxes(document.getElementById('symsel').value);
 drawSym(document.getElementById('symsel').value);
-</script>""" % (options, addl_ctl, run_checks, payload, statspayload, meta)
-
-
-_CLASS_METRICS = [('Realised', 'pnl', 2), ('Unrealised', 'unrealised', 2),
-                  ('Total', 'total', 2), ('Positions', 'trades', 0),
-                  ('Win %', 'win_rate', 1), ('Sharpe', 'sharpe', 3),
-                  ('Max DD', 'max_dd', 2)]
+</script>""" % (options, sync_ctl, run_checks, payload, statspayload, meta)
 
 
 def _class_compare_html(runs):
-    """Per-class P&L compare (job runs only — needs position logs): a class
-    dropdown drives one table, same metrics/coloring as the per-symbol
-    contribution tables in the dashboard, with every symbol of that class
-    pooled into one trade-level line."""
     runs = [r for r in runs if r.get('classdata')]
     if not runs:
         return ''
@@ -460,14 +679,13 @@ def _class_compare_html(runs):
     metrics = json.dumps(_CLASS_METRICS)
     options = ''.join('<option>%s</option>' % html.escape(c) for c in classes)
     return """
-<h2>By class</h2>
-<p class="note">Every symbol of a sector/category (Layer 1, DeFi, Meme, ...) pooled into one
+<p class="note" style="margin-top:0;">Every symbol of a sector/category (Layer 1, DeFi, Meme, ...) pooled into one
 trade-level line, so win rate/Sharpe/max DD are computed correctly rather than averaged
-across the class's symbols. Job runs only (needs position logs).</p>
-<p>
-  <select id="classsel" style="background:#1b2536;color:#e7edf5;border:1px solid #243048;
-   border-radius:6px;padding:6px 10px;font-size:14px">%s</select>
-</p>
+across the class's symbols.</p>
+<div style="margin-bottom: 24px;">
+  <select id="classsel" style="background:#111827;color:#F3F4F6;border:1px solid #374151;
+   border-radius:6px;padding:8px 12px;font-size:14px;outline:none;cursor:pointer">%s</select>
+</div>
 <div id="classcmp"></div>
 <script>
 const CLASSDATA = %s;
@@ -477,7 +695,12 @@ function fmtc(v, dp) { return v == null ? '\\u2014' : Number(v).toFixed(dp); }
 function drawClass(cls) {
   const rows = CLASSRUNS.map(name => (CLASSDATA[name] || {})[cls] || null);
   const symsUnion = [...new Set(rows.filter(Boolean).flatMap(r => r.symbols))].sort();
-  let head = '<tr><th></th>' + CLASSRUNS.map(n => '<th>' + n + '</th>').join('') + '</tr>';
+  const isPair = CLASSRUNS.length === 2;
+  
+  let head = '<tr><th></th>' + CLASSRUNS.map(n => '<th>' + n + '</th>').join('');
+  if (isPair) head += '<th>Δ (' + CLASSRUNS[0] + ' &minus; ' + CLASSRUNS[1] + ')</th>';
+  head += '</tr>';
+  
   let body = CLASSMETRICS.map(([label, key, dp]) => {
     const vals = rows.map(r => r ? r[key] : null);
     const nums = vals.filter(v => typeof v === 'number');
@@ -485,15 +708,28 @@ function drawClass(cls) {
     if (nums.length > 1 && new Set(nums).size > 1) {
       bestV = Math.max(...nums); worstV = Math.min(...nums);
     }
-    const cells = vals.map(v => {
+    let cells = vals.map(v => {
       const cls2 = v == null ? '' : v === bestV ? 'pos' : v === worstV ? 'neg' : '';
       return '<td class="' + cls2 + '">' + fmtc(v, dp) + '</td>';
     }).join('');
+    
+    if (isPair) {
+        const v0 = vals[0], v1 = vals[1];
+        if (typeof v0 === 'number' && typeof v1 === 'number') {
+            const delta = v0 - v1;
+            const cls2 = delta > 0 ? 'pos' : delta < 0 ? 'neg' : '';
+            const sign = delta > 0 ? '+' : '';
+            cells += '<td class="delta ' + cls2 + '">' + sign + fmtc(delta, dp) + '</td>';
+        } else {
+            cells += '<td class="delta">&mdash;</td>';
+        }
+    }
+    
     return '<tr><th class="rowh">' + label + '</th>' + cells + '</tr>';
   }).join('');
   document.getElementById('classcmp').innerHTML =
-    '<p class="note">' + symsUnion.length + ' symbols: ' + symsUnion.join(', ') + '</p>' +
-    '<table><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+    '<p class="note" style="margin-bottom: 16px;">' + symsUnion.length + ' symbols: ' + symsUnion.join(', ') + '</p>' +
+    '<div class="table-container"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>';
 }
 document.getElementById('classsel').onchange = e => drawClass(e.target.value);
 drawClass(document.getElementById('classsel').value);
@@ -501,8 +737,7 @@ drawClass(document.getElementById('classsel').value);
 
 
 def div(fig, first=False):
-    return pio.to_html(fig, full_html=False,
-                       include_plotlyjs=('inline' if first else False),
+    return pio.to_html(fig, full_html=False, include_plotlyjs=('cdn' if first else False),
                        config={'displayModeBar': True, 'responsive': True, 'scrollZoom': True})
 
 
@@ -510,10 +745,10 @@ def build(symbol=SYMBOL_PREF, selections=None, timeframe='1m', days=None):
     import run_backtest
     timeframe = timeframe if timeframe in ('1m', '1h') else '1m'
     _, _, comp = run_backtest._tf_cfg(timeframe)
-    if symbol:                                  # single-symbol: full internals
+    if symbol:
         sym, path = _ensure_symbol_csv(symbol, timeframe, days)
         feeds, subtitle = [(sym, path)], sym
-    else:                                       # no symbol -> whole portfolio
+    else:
         feeds = _ensure_all_csvs(timeframe, days)
         if not feeds:
             raise ValueError('no %s data available' % timeframe)
@@ -530,22 +765,59 @@ def build(symbol=SYMBOL_PREF, selections=None, timeframe='1m', days=None):
         color = PALETTE[i % len(PALETTE)]
         print('[report] running %s ...' % name)
         res = run_strategy(name, cls, params, feeds, color, comp)
-        res['params'] = dict(params, timeframe=timeframe)   # for the disclaimer
+        res['params'] = dict(params, timeframe=timeframe)
         results.append(res)
     if not results:
         raise ValueError('no valid strategies selected')
     print('[report] building interactive figures ...')
-    _render_page(results, subtitle=subtitle)
+    symbols = [f[0] for f in feeds]
+    _render_page(results, subtitle=subtitle, symbols=symbols)
 
 
-def _render_page(results, subtitle):
+def _render_page(results, subtitle, symbols=None):
     with_diag = [r for r in results if r.get('diag') is not None]
     ref = with_diag[0]['diag'] if with_diag else results[0]['equity']
-    span = '%s → %s' % (ref.index[0].strftime('%Y-%m-%d'),
-                        ref.index[-1].strftime('%Y-%m-%d'))
+    
+    start_dt = ref.index[0]
+    end_dt = ref.index[-1]
+    span_short = '%s → %s' % (start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d'))
+    span_long = '%s &mdash; %s' % (start_dt.strftime('%b %d, %Y'), end_dt.strftime('%b %d, %Y'))
 
-    # parameters as a proper comparison table (param rows x run columns);
-    # cells where runs differ are highlighted
+    tfs = sorted({str((r.get('params') or {}).get('timeframe', '1m')) for r in results})
+    tf_badge = f'<span style="display:inline-block; margin-left:8px; font-size:0.85rem; color:var(--muted); background:rgba(255,255,255,0.05); padding:2px 8px; border-radius:4px; border:1px solid var(--line);">Interval: {", ".join(tfs)}</span>'
+
+    overview_html = f'''
+    <div style="{ 'margin-bottom: 24px; padding-bottom: 24px; border-bottom: 1px solid var(--line);' if symbols else '' }">
+        <div style="color:var(--muted); text-transform:uppercase; font-size:0.8rem; font-weight:600; letter-spacing:0.05em; margin-bottom:8px;">Backtest Period</div>
+        <div style="display:flex; align-items:center; flex-wrap:wrap; gap:4px;">
+            <div style="font-size:1.25rem; font-weight:600; color:var(--ink);">{span_long}</div>
+            <div style="color:var(--muted); font-size:0.95rem; margin-left:8px;">({len(ref)} bars)</div>
+            {tf_badge}
+        </div>
+    </div>
+    '''
+    
+    if symbols:
+        by_class = {}
+        for sym in symbols:
+            cls = symbol_classes.classify(sym)
+            by_class.setdefault(cls, []).append(sym)
+        
+        cls_blocks = []
+        for cls in sorted(by_class.keys()):
+            syms = sorted(by_class[cls])
+            sym_spans = ''.join(f'<span style="display:inline-block; background:rgba(255,255,255,0.03); padding:4px 10px; border-radius:6px; margin:3px; font-size:0.85rem; border:1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color:var(--ink);">{html.escape(s)}</span>' for s in syms)
+            cls_blocks.append(f'<div style="flex: 1 1 300px; background:rgba(0,0,0,0.2); padding:16px; border-radius:8px; border:1px solid var(--line);"><div style="font-weight:600; color:var(--accent); margin-bottom:12px; font-size:0.9rem; text-transform: uppercase; letter-spacing: 0.05em;">{html.escape(cls)} <span style="color:var(--muted); font-weight:normal; font-size:0.8rem;">({len(syms)})</span></div><div>{sym_spans}</div></div>')
+        
+        overview_html += f'''
+        <div>
+            <div style="color:var(--muted); text-transform:uppercase; font-size:0.8rem; font-weight:600; letter-spacing:0.05em; margin-bottom:12px;">Universe Overview ({len(symbols)} Symbols)</div>
+            <div style="display:flex; flex-wrap:wrap; gap:16px;">
+                {''.join(cls_blocks)}
+            </div>
+        </div>
+        '''
+
     _skip = {'window_start', 'window_end'}
     keys = sorted({k for r in results for k in (r.get('params') or {})} - _skip)
     if keys:
@@ -555,67 +827,71 @@ def _render_page(results, subtitle):
             vals = [(r.get('params') or {}).get(k) for r in results]
             differ = len({json.dumps(v, default=str) for v in vals}) > 1
             cells = ''.join(
-                '<td%s>%s</td>' % (' style="color:#e3b341;font-weight:600"' if differ else '',
+                '<td%s>%s</td>' % (' style="color:#FBBF24;font-weight:600"' if differ else '',
                                    '&mdash;' if v is None else v)
                 for v in vals)
             body += '<tr><th class="rowh">%s</th>%s</tr>' % (k, cells)
-        cfg_lines = ('<h2>Parameters</h2>'
-                     '<table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table>'
-                     '<p class="note">highlighted values differ between runs</p>'
+        cfg_lines = ('<div class="table-container"><table><thead><tr><th></th>%s</tr></thead><tbody>%s</tbody></table></div>'
+                     '<p class="note" style="margin-top:8px">Highlighted values differ between runs</p>'
                      % (head, body))
     else:
         cfg_lines = ''
 
-    # timeframe disclaimer (from whichever runs recorded one)
-    tfs = sorted({str((r.get('params') or {}).get('timeframe', '1m')) for r in results})
-    tf_note = '<p class="note">Bars: %s.</p>' % ', '.join(tfs)
-
-    # (label, html) — label is used for the jump-to-section index; sections
-    # without a real heading (disclaimers, the params table's own <h2> is
-    # inline in cfg_lines) pass '' and are skipped by the index.
-    parts = [
+    parts = []
+    if overview_html:
+        parts.append(('Backtest Overview', overview_html))
+        
+    parts.extend([
         ('Summary', summary_table(results)),
-        ('Portfolio stats', stats_table(results)),   # full compare (archived runs)
-        ('', tf_note),
+        ('Portfolio Stats', stats_table(results)),
         ('Parameters', cfg_lines),
-        ('', '<p class="note">Hover for values · drag to zoom · double-click to reset.</p>'),
-        ('Win rate & PnL', '<h2>Win rate &amp; PnL</h2>' + div(fig_winpnl(results), first=True)),
-        ('Equity curve', '<h2>Equity curve</h2>' + div(fig_equity(results))),
-        ('By class', _class_compare_html(results)),   # jobs with position logs only; '' otherwise
-        ('Per-symbol compare', _sym_compare_html(results)),   # jobs w/ chartdata only; '' otherwise
-    ]
+        ('Win Rate, PnL & Max DD', div(fig_winpnl(results), first=True)),
+        ('Equity Curve', div(fig_equity(results))),
+        ('By Class', _class_compare_html(results)),
+        ('Per-symbol Compare', _sym_compare_html(results)),
+    ])
+    
     if with_diag:
         parts += [
-            ('Prediction & confidence bands',
-             '<h2>Prediction &amp; confidence bands</h2>'
-             '<p class="note">Drag-select to zoom into the prediction line and band.</p>'
+            ('Prediction & Confidence Bands',
+             '<p class="note" style="margin-top:0;">Drag-select to zoom into the prediction line and band.</p>'
              + div(fig_pred(with_diag))),
-            ('Innovation & uncertainty',
-             '<h2>Innovation &amp; its uncertainty</h2>'
-             '<p class="note">Prediction error, and the filter\'s expected error (√S).</p>'
+            ('Innovation & Uncertainty',
+             '<p class="note" style="margin-top:0;">Prediction error, and the filter\'s expected error (√S).</p>'
              + div(fig_innov(with_diag))),
-            ('Covariance matrix P',
-             '<h2>Covariance matrix P</h2>'
-             '<p class="note">Post-warmup steady state · autoscale to see the initial transient.</p>'),
+            ('Covariance Matrix P',
+             '<p class="note" style="margin-top:0;">Post-warmup steady state · autoscale to see the initial transient.</p>'),
         ]
         for res in with_diag:
-            parts.append(('', '<h3>%s</h3>' % res['name'] + div(fig_P(res))))
+            parts.append((res['name'] + ' (Covariance)', div(fig_P(res))))
 
     names = ' vs '.join(r['name'] for r in results)
-    # each logical block gets its own bordered card (and, if labeled, an
-    # anchor id for the jump-to-section index) so sections read as distinct
-    # panels instead of one continuous scroll
     sections, toc = [], []
+    
     for i, (label, p) in enumerate(parts):
         if not p:
             continue
         sec_id = 'sec-%d' % i
-        sections.append('<section class="rpt-sec" id="%s">%s</section>' % (sec_id, p))
+        
+        is_wide = label in ('Backtest Overview', 'Summary', 'Equity Curve', 'Per-symbol Compare', 'Prediction & Confidence Bands',
+                            'Innovation & Uncertainty', 'Portfolio Stats', 'By Class') or 'Covariance' in label
+        
+        if len(results) >= 4 and label in ('Parameters', 'Win Rate, PnL & Max DD'):
+            is_wide = True 
+            
+        css_class = "rpt-sec full-width" if is_wide else "rpt-sec"
+        
+        header_html = f'<h2>{html.escape(label)}</h2>' if not label.endswith('(Covariance)') else f'<h3>{html.escape(label)}</h3>'
+        sections.append(f'<section class="{css_class}" id="{sec_id}">{header_html}{p}</section>')
+        
         if label:
-            toc.append('<a href="#%s">%s</a>' % (sec_id, html.escape(label)))
+            toc.append(f'<a href="#{sec_id}">{html.escape(label)}</a>')
+            
     body = '\n'.join(sections)
-    toc_html = '<nav class="rpt-toc"><b>Jump to:</b> ' + ' &nbsp;·&nbsp; '.join(toc) + '</nav>' if toc else ''
-    page_html = TEMPLATE.format(symbol=subtitle, span=span, names=names,
+    
+    toc_html = '<nav class="rpt-toc"><div class="toc-title">Dashboard Sections</div>' + ''.join(toc) + '</nav>' if toc else ''
+    
+    page_html = TEMPLATE.format(symbol=subtitle, span=span_short, names=names,
                                 bars=len(ref), body=body, toc=toc_html)
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, 'index.html')
@@ -624,11 +900,8 @@ def _render_page(results, subtitle):
     print('[report] wrote %s (%.1f MB)' % (out, os.path.getsize(out) / 1e6))
 
 
-SYM_DS = 300   # points per series in the interactive symbol compare
-
-
-MAX_SYMDATA_SYMBOLS = 40   # per run, in the per-symbol compare panel
-
+MAX_SYMDATA_SYMBOLS = 250
+SYM_DS = 300
 
 def _job_symdata(chart_dir, per_symbol=None, max_symbols=MAX_SYMDATA_SYMBOLS):
     paths = sorted(glob.glob(os.path.join(chart_dir, '*.json')))
@@ -665,13 +938,11 @@ def _job_symdata(chart_dir, per_symbol=None, max_symbols=MAX_SYMDATA_SYMBOLS):
                                    'additional': L.get('kind') == 'additional',
                                    't': [q['time'] for q in pts[::st]],
                                    'v': [q['value'] for q in pts[::st]]})
-        out[sym] = entry
+        out[sym.upper()] = entry
     return out
 
 
 def _read_unrealised(pdir):
-    """{symbol: unrealised_mtm} from the run's unrealised.json sidecar (one
-    level up from the positions/ dir). Empty when absent."""
     path = os.path.join(os.path.dirname(pdir.rstrip(r'\/')), 'unrealised.json')
     try:
         with open(path, encoding='utf-8') as f:
@@ -681,10 +952,6 @@ def _read_unrealised(pdir):
 
 
 def _job_symstats(pdir):
-    """{symbol: {trades, pnl, unrealised, total, win_rate, sharpe, max_dd}}
-    for one job, from its positions/<SYMBOL>.csv logs (+ unrealised.json for
-    open-position MTM) — same trade-level math the dashboard's per-symbol
-    contribution table uses. `total` = realised pnl + unrealised."""
     if not os.path.isdir(pdir):
         return None
     by_sym = pnl_stats.read_position_pnls(pdir)
@@ -696,14 +963,11 @@ def _job_symstats(pdir):
         st = pnl_stats.pnl_stats(by_sym.get(sym, []))
         st['unrealised'] = round(float(unreal.get(sym, 0.0)), 4)
         st['total'] = round((st.get('pnl') or 0.0) + st['unrealised'], 4)
-        out[sym] = st
+        out[sym.upper()] = st
     return out
 
 
 def _job_classdata(pdir):
-    """{class: {trades, pnl, unrealised, total, win_rate, sharpe, max_dd,
-    symbols}} for one job, from its positions/<SYMBOL>.csv logs (+
-    unrealised.json), pooling symbols by sector tag."""
     if not os.path.isdir(pdir):
         return None
     by_sym = pnl_stats.read_position_pnls(pdir)
@@ -714,9 +978,10 @@ def _job_classdata(pdir):
     class_syms = {}
     class_unreal = {}
     for sym in set(by_sym) | set(unreal):
-        cls = symbol_classes.classify(sym)
+        upper_sym = sym.upper()
+        cls = symbol_classes.classify(upper_sym)
         by_class.setdefault(cls, []).extend(by_sym.get(sym, []))
-        class_syms.setdefault(cls, []).append(sym)
+        class_syms.setdefault(cls, []).append(upper_sym)
         class_unreal[cls] = class_unreal.get(cls, 0.0) + float(unreal.get(sym, 0.0))
     out = {}
     for cls, pnls in by_class.items():
@@ -757,7 +1022,7 @@ def build_from_folders(tags):
                 snap = json.load(f)
             symdata = None
             label_tag = tag
-            classdata = None   # archived runs don't keep per-symbol position logs
+            classdata = None
             symstats = None
         p, s = snap.get('params', {}), snap.get('summary', {})
         eq = pd.DataFrame(snap.get('equity', []), columns=['dt', 'value'])
@@ -768,72 +1033,312 @@ def build_from_folders(tags):
                      trades=s.get('trades_closed'), trades_total=s.get('trades_total'),
                      wins=s.get('won'),
                      win_rate=s.get('win_rate_pct'), innov_rms=None)
-        # prefer the run's friendly name (defaults to the run tag/job id
-        # itself when none was given, so this is never blank)
         label = '%s · %s' % (p.get('strategy', '?'), snap.get('name') or label_tag)
         results.append(dict(name=label, diag=None, equity=eq, stats=stats,
-                            summary=s,                # full stats comparison
-                            symdata=symdata,          # job chartdata (or None)
-                            classdata=classdata,      # per-class pnl stats (or None)
-                            symstats=symstats,        # per-symbol pnl stats (or None)
-                            color=PALETTE[i % len(PALETTE)], params=p))
+                            summary=s, symdata=symdata, classdata=classdata, 
+                            symstats=symstats, color=PALETTE[i % len(PALETTE)], params=p))
     if not results:
         raise ValueError('no runs with usable snapshots selected')
     print('[report] comparing %d run(s) ...' % len(results))
-    _render_page(results, subtitle='saved backtests')
+    
+    all_syms = set()
+    for r in results:
+        if r.get('symdata'): all_syms.update(r['symdata'].keys())
+        if r.get('symstats'): all_syms.update(r['symstats'].keys())
+        if r.get('classdata'):
+            for cls, dat in r['classdata'].items():
+                all_syms.update(dat.get('symbols', []))
+    symbols = sorted(list(all_syms))
+    
+    _render_page(results, subtitle='saved backtests', symbols=symbols)
 
 
 TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{names} · {symbol}</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
-  :root {{ --bg:#0f1420; --ink:#e7edf5; --muted:#8a97ad; --line:#243048; --accent:#37c1d1;
-           --panel:#151c2c; --pos:#3fb950; --neg:#f85149; }}
-  * {{ box-sizing:border-box; }}
-  body {{ margin:0; background:var(--bg); color:var(--ink);
-         font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; line-height:1.5; }}
-  .wrap {{ max-width:1120px; margin:0 auto; padding:40px 24px 80px; }}
-  header p {{ color:var(--muted); margin:.2em 0; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.85rem; }}
-  h1 {{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:1.7rem; letter-spacing:-.02em; margin:0 0 4px; }}
-  h2 {{ font-size:1.05rem; margin:0 0 6px; padding-bottom:6px; border-bottom:1px solid var(--line); }}
-  h3 {{ font-size:.92rem; color:var(--muted); margin:22px 0 4px; font-weight:600; }}
-  table {{ border-collapse:collapse; margin:18px 0 6px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.9rem; }}
-  th,td {{ padding:8px 16px; text-align:right; border-bottom:1px solid var(--line); }}
-  thead th {{ color:var(--accent); font-weight:600; }}
-  .rowh {{ text-align:left; color:var(--ink); }}
-  tbody td {{ font-variant-numeric:tabular-nums; }}
-  .note {{ color:var(--muted); font-size:.9rem; max-width:76ch; margin:6px 0 10px; }}
-  .note b {{ color:var(--ink); font-weight:600; }}
-  .plotly-graph-div {{ margin:0 0 6px; }}
-  .pos {{ color:var(--pos); font-weight:600; }}
-  .neg {{ color:var(--neg); font-weight:600; }}
-  .rpt-sec {{ background:var(--panel); border:1px solid var(--line); border-radius:10px;
-             padding:20px 24px; margin:18px 0; }}
-  .rpt-sec:empty {{ display:none; }}
-  .lookup-bar {{ position:sticky; top:0; z-index:10; background:var(--bg);
-                padding:14px 0 10px; margin-bottom:4px; }}
-  .lookup-bar input {{ width:100%; max-width:420px; background:var(--panel);
-                       color:var(--ink); border:1px solid var(--line); border-radius:8px;
-                       padding:9px 14px; font-size:.92rem; }}
-  .lookup-bar input:focus {{ outline:1px solid var(--accent); }}
-  .lookup-hint {{ color:var(--muted); font-size:.8rem; margin:6px 0 0; }}
-  .rpt-sec.rpt-dim {{ opacity:.25; }}
-  .rpt-toc {{ font-size:.85rem; color:var(--muted); margin:0 0 14px; line-height:1.9; }}
-  .rpt-toc a {{ color:var(--accent); text-decoration:none; }}
-  .rpt-toc a:hover {{ text-decoration:underline; }}
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  
+  :root {{ 
+      --bg: #0B1121; 
+      --ink: #F3F4F6; 
+      --muted: #9CA3AF; 
+      --line: #1F2937; 
+      --accent: #38BDF8;
+      --panel: #111827; 
+      --pos: #34D399; 
+      --neg: #F87171; 
+      --delta-bg: rgba(56, 189, 248, 0.04);
+  }}
+  
+  * {{ box-sizing: border-box; }}
+  
+  body {{ 
+      margin: 0; 
+      background: var(--bg); 
+      color: var(--ink);
+      font-family: 'Inter', system-ui, -apple-system, sans-serif; 
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+  }}
+  
+  /* Core Layout Architecture */
+  .dashboard-layout {{ 
+      display: flex; 
+      gap: 32px; 
+      max-width: 1700px; 
+      margin: 0 auto; 
+      padding: 32px 24px 80px; 
+      align-items: flex-start;
+  }}
+  
+  /* Sidebar styles */
+  .sidebar {{ 
+      flex: 0 0 280px; 
+      position: sticky; 
+      top: 32px; 
+      display: flex; 
+      flex-direction: column; 
+      gap: 20px; 
+      max-height: calc(100vh - 64px); 
+      overflow-y: auto;
+      padding-right: 8px;
+  }}
+  
+  /* Custom scrollbar for sidebar */
+  .sidebar::-webkit-scrollbar {{ width: 6px; }}
+  .sidebar::-webkit-scrollbar-track {{ background: transparent; }}
+  .sidebar::-webkit-scrollbar-thumb {{ background: var(--line); border-radius: 4px; }}
+  
+  .sidebar-header p {{ 
+      color: var(--muted); 
+      margin: 0.5em 0 0; 
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace; 
+      font-size: 0.85rem; 
+      letter-spacing: 0.02em;
+  }}
+  
+  h1 {{ 
+      font-size: 1.75rem; 
+      font-weight: 700; 
+      letter-spacing: -0.025em; 
+      margin: 0 0 4px; 
+      background: linear-gradient(to right, #38BDF8, #818CF8);
+      -webkit-background-clip: text;
+      color: transparent;
+  }}
+  
+  /* Grid Content styles */
+  .content-grid {{ 
+      flex: 1; 
+      display: grid; 
+      grid-template-columns: repeat(2, 1fr); 
+      gap: 24px; 
+      min-width: 0; /* Prevents CSS grid blowout */
+  }}
+  
+  .rpt-sec {{ 
+      background: var(--panel); 
+      border: 1px solid var(--line); 
+      border-radius: 12px;
+      padding: 24px 28px; 
+      margin: 0; 
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      transition: transform 0.2s, box-shadow 0.2s;
+      overflow: hidden;
+  }}
+  
+  .rpt-sec:hover {{ 
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); 
+  }}
+  
+  .rpt-sec:empty {{ display: none; }}
+  .rpt-sec.full-width {{ grid-column: 1 / -1; }}
+  
+  /* New Cinematic Headers */
+  h2 {{ 
+      font-size: 1.25rem; 
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 20px; 
+      padding-bottom: 12px; 
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05); 
+      color: #FFFFFF;
+      display: flex;
+      align-items: center;
+  }}
+  
+  h2::before {{
+      content: '';
+      display: inline-block;
+      width: 6px;
+      height: 22px;
+      background: linear-gradient(to bottom, #38BDF8, #818CF8);
+      margin-right: 12px;
+      border-radius: 4px;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+  }}
+  
+  h3 {{ 
+      font-size: 1rem; 
+      color: var(--ink); 
+      margin: 0 0 12px; 
+      font-weight: 600; 
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: flex;
+      align-items: center;
+  }}
+  
+  h3::before {{
+      content: '▹';
+      color: var(--accent);
+      margin-right: 8px;
+      font-size: 1.2rem;
+  }}
+  
+  .table-container {{ overflow-x: auto; width: 100%%; border-radius: 8px; }}
+  
+  table {{ 
+      width: 100%%;
+      border-collapse: collapse; 
+      margin: 8px 0; 
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace; 
+      font-size: 0.9rem; 
+  }}
+  
+  th, td {{ padding: 12px 14px; text-align: right; border-bottom: 1px solid var(--line); }}
+  
+  thead th {{ 
+      color: var(--accent); 
+      font-weight: 600; 
+      text-transform: uppercase; 
+      font-size: 0.75rem; 
+      letter-spacing: 0.05em; 
+      border-bottom: 2px solid var(--line);
+  }}
+  
+  .rowh {{ text-align: left; color: var(--ink); font-weight: 600; }}
+  tbody tr:nth-child(even) {{ background-color: rgba(255, 255, 255, 0.015); }}
+  tbody tr:hover {{ background-color: rgba(255, 255, 255, 0.04); transition: background-color 0.2s ease; }}
+  tbody td {{ font-variant-numeric: tabular-nums; }}
+  
+  .note {{ color: var(--muted); font-size: 0.85rem; max-width: 80ch; margin: 4px 0 12px; }}
+  .note b {{ color: var(--ink); font-weight: 600; }}
+  .plotly-graph-div {{ margin: 0 0 12px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }}
+  
+  .pos {{ color: var(--pos); font-weight: 600; }}
+  .neg {{ color: var(--neg); font-weight: 600; }}
+  
+  /* Delta Styling */
+  .delta {{ background-color: var(--delta-bg); border-left: 1px solid rgba(56, 189, 248, 0.2); }}
+  tr.delta-row {{ background-color: var(--delta-bg) !important; border-top: 2px solid rgba(56, 189, 248, 0.2); }}
+  tr.delta-row th {{ color: var(--accent); }}
+  
+  /* Search Bar */
+  .lookup-bar {{ margin-bottom: 8px; }}
+  .lookup-bar input {{ 
+      width: 100%%; 
+      background: rgba(17, 24, 39, 0.8);
+      color: var(--ink); 
+      border: 1px solid var(--line); 
+      border-radius: 8px;
+      padding: 10px 14px; 
+      font-size: 0.95rem; 
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+      transition: border-color 0.2s, box-shadow 0.2s;
+  }}
+  .lookup-bar input:focus {{ 
+      outline: none;
+      border-color: var(--accent); 
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2), inset 0 2px 4px rgba(0,0,0,0.1);
+  }}
+  .lookup-hint {{ color: var(--muted); font-size: 0.85rem; margin: 8px 0 0; font-weight: 500; }}
+  .rpt-sec.rpt-dim {{ opacity: 0.3; filter: grayscale(100%%); }}
+  
+  /* Navigation TOC */
+  .rpt-toc {{ 
+      display: flex; 
+      flex-direction: column; 
+      gap: 6px; 
+  }}
+  .toc-title {{ 
+      font-size: 0.75rem; 
+      text-transform: uppercase; 
+      letter-spacing: 0.1em; 
+      color: var(--muted); 
+      margin-bottom: 8px; 
+      font-weight: 600; 
+      padding-left: 4px; 
+  }}
+  .rpt-toc a {{ 
+      padding: 8px 12px; 
+      border-radius: 6px; 
+      background: rgba(255,255,255,0.015); 
+      border: 1px solid var(--line); 
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: 500;
+      text-decoration: none;
+      transition: all 0.2s; 
+  }}
+  .rpt-toc a:hover {{ 
+      background: rgba(56, 189, 248, 0.08); 
+      border-color: var(--accent); 
+      color: var(--accent); 
+      transform: translateX(4px); 
+  }}
+  
+  /* Fullscreen Graph Feature */
+  .fullscreen-chart {{
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      z-index: 9999 !important;
+      background: rgba(11, 17, 33, 0.98) !important;
+      backdrop-filter: blur(10px);
+      padding: 24px !important;
+      display: flex;
+      flex-direction: column;
+      border-radius: 0 !important;
+      border: none !important;
+  }}
+  .fullscreen-chart #symcmp {{
+      flex: 1;
+      height: 100%% !important;
+  }}
+  
+  /* Responsive Design */
+  @media (max-width: 1024px) {{
+      .dashboard-layout {{ flex-direction: column; }}
+      .sidebar {{ position: static; max-height: none; width: 100%%; flex: none; padding-right: 0; }}
+      .content-grid {{ grid-template-columns: 1fr; }}
+  }}
 </style></head>
-<body><div class="wrap">
-<header>
-  <h1>{names}</h1>
-  <p>symbol {symbol} · {bars} bars · {span}</p>
-</header>
-<div class="lookup-bar">
-  <input type="search" id="rptlookup" placeholder="Search this report (section titles, params, symbols)…" autocomplete="off">
-  <p class="lookup-hint" id="rptlookuphint"></p>
-</div>
-{toc}
-{body}
+<body>
+  <div class="dashboard-layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1>{names}</h1>
+        <p>SYMBOL: {symbol}<br>{bars} BARS<br>{span}</p>
+      </div>
+      <div class="lookup-bar">
+        <input type="search" id="rptlookup" placeholder="Search report metrics, params..." autocomplete="off">
+        <p class="lookup-hint" id="rptlookuphint"></p>
+      </div>
+      {toc}
+    </aside>
+    
+    <main class="content-grid">
+      {body}
+    </main>
+  </div>
+  
 <script>
 (function() {{
   const input = document.getElementById('rptlookup');
@@ -861,7 +1366,7 @@ TEMPLATE = """<!doctype html>
   input.addEventListener('input', () => {{ clearTimeout(t); t = setTimeout(run, 150); }});
 }})();
 </script>
-</div></body></html>"""
+</body></html>"""
 
 
 if __name__ == '__main__':
